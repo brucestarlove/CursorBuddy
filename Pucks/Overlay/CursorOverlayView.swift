@@ -23,11 +23,8 @@ struct CursorOverlayView: View {
                 if voiceState.state == .listening || voiceState.state == .thinking {
                     HStack(spacing: 6) {
                         if voiceState.state == .listening {
-                            // Pulsing dot
-                            Circle()
-                                .fill(Color.red)
-                                .frame(width: 8, height: 8)
-                                .modifier(PulseModifier())
+                            AudioWaveformView(levels: voiceState.audioLevels)
+                                .frame(width: 48, height: 16)
                             Text("Listening...")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundColor(.white)
@@ -42,12 +39,12 @@ struct CursorOverlayView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
-                    .background(
+                    .background {
                         Capsule()
-                            .fill(.ultraThinMaterial)
-                            .overlay(Capsule().fill(Color.black.opacity(0.45)))
-                    )
-                    .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 3)
+                            .fill(.clear)
+                            .glassEffect(.regular)
+                    }
+                    .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
                     .position(x: pos.x + 50, y: pos.y - 10)
                     .animation(.interactiveSpring(response: 0.15, dampingFraction: 0.8), value: pos)
                 }
@@ -72,14 +69,11 @@ struct CursorOverlayView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(
+                        .background {
                             Capsule()
-                                .fill(.ultraThinMaterial)
-                                .overlay(
-                                    Capsule()
-                                        .fill(Color.blue.opacity(0.35))
-                                )
-                        )
+                                .fill(Color.blue.opacity(0.15))
+                                .glassEffect(.regular)
+                        }
 
                         Text(selectionPreviewText)
                             .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -89,14 +83,11 @@ struct CursorOverlayView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
                             .frame(maxWidth: 220, alignment: .leading)
-                            .background(
+                            .background {
                                 RoundedRectangle(cornerRadius: 14)
-                                    .fill(.ultraThinMaterial)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14)
-                                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                                    )
-                            )
+                                    .fill(.clear)
+                                    .glassEffect(.regular)
+                            }
                     }
                     .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
                     .position(x: pos.x + 118, y: pos.y + 22)
@@ -127,10 +118,11 @@ struct CursorOverlayView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(
+                        .background {
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.blue.opacity(0.85))
-                        )
+                                .fill(Color.blue.opacity(0.2))
+                                .glassEffect(.regular)
+                        }
                         // Position bubble above the cursor target
                         .position(x: targetPoint.x, y: targetPoint.y - 28)
                         .scaleEffect(detector.navigationBubbleScale)
@@ -224,11 +216,78 @@ struct PulseModifier: ViewModifier {
     }
 }
 
+// MARK: - Audio Waveform View
+
+/// A mini waveform that reacts to live audio power levels.
+/// Renders vertical bars that scale based on incoming audio amplitude.
+struct AudioWaveformView: View {
+    let levels: [Float]
+
+    /// Number of bars to display.
+    private let barCount = 14
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<barCount, id: \.self) { index in
+                let level = sampleLevel(at: index)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(barColor(for: level))
+                    .frame(width: 2, height: barHeight(for: level))
+                    .animation(.easeOut(duration: 0.08), value: level)
+            }
+        }
+    }
+
+    /// Map bar index to a level from the rolling buffer.
+    private func sampleLevel(at index: Int) -> Float {
+        guard !levels.isEmpty else { return 0.05 }
+        // Map barCount indices across the available levels
+        let fraction = Float(index) / Float(max(barCount - 1, 1))
+        let sampleIndex = Int(fraction * Float(levels.count - 1))
+        return levels[min(sampleIndex, levels.count - 1)]
+    }
+
+    private func barHeight(for level: Float) -> CGFloat {
+        let minH: CGFloat = 2
+        let maxH: CGFloat = 16
+        return minH + CGFloat(level) * (maxH - minH)
+    }
+
+    private func barColor(for level: Float) -> Color {
+        // Gradient from white to red as level increases
+        let t = Double(min(level * 1.5, 1.0))
+        return Color(
+            red: 1.0,
+            green: 1.0 - t * 0.6,
+            blue: 1.0 - t * 0.7
+        )
+    }
+}
+
 // MARK: - Voice State Observable (bridge from CompanionVoiceState)
 
 @MainActor
 class VoiceStateObservable: ObservableObject {
     @Published var state: CompanionVoiceState = .idle
+
+    /// Rolling window of recent audio power levels (0…1) for waveform display.
+    @Published var audioLevels: [Float] = []
+
+    /// Maximum number of bars in the waveform.
+    private let maxBars = 28
+
+    /// Push a new audio power sample into the rolling buffer.
+    func pushAudioLevel(_ level: Float) {
+        audioLevels.append(level)
+        if audioLevels.count > maxBars {
+            audioLevels.removeFirst(audioLevels.count - maxBars)
+        }
+    }
+
+    /// Clear the waveform when recording stops.
+    func clearAudioLevels() {
+        audioLevels.removeAll()
+    }
 }
 
 // MARK: - Mouse Tracker

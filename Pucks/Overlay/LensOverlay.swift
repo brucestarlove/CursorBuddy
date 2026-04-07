@@ -345,10 +345,8 @@ final class LensWindowManager {
 
         // The hosting view must also be transparent for glass to see through
         let hostView = NSHostingView(
-            rootView: GlassEffectContainer {
-                LensOverlayView(config: config)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            rootView: LensOverlayView(config: config)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         )
         hostView.wantsLayer = true
         hostView.layer?.backgroundColor = .clear

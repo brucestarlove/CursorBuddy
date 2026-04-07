@@ -100,7 +100,10 @@ final class OverlayWindowManager: ObservableObject {
     func setContent<V: View>(@ViewBuilder _ content: () -> V) {
         let view = content()
         for window in windows.values {
-            window.contentView = NSHostingView(rootView: view)
+            let hostView = NSHostingView(rootView: view)
+            hostView.wantsLayer = true
+            hostView.layer?.backgroundColor = .clear
+            window.contentView = hostView
         }
     }
 

@@ -66,15 +66,12 @@ struct CompanionResponseOverlayView: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(
+                .background {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.black.opacity(0.55))
-                        )
-                )
-                .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        .fill(.clear)
+                        .glassEffect(.regular)
+                }
+                .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
                 .frame(maxWidth: 360, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .opacity(viewModel.opacity)
@@ -145,6 +142,8 @@ final class CompanionResponseOverlayManager {
         let hostView = NSHostingView(
             rootView: CompanionResponseOverlayView(viewModel: viewModel)
         )
+        hostView.wantsLayer = true
+        hostView.layer?.backgroundColor = .clear
         panel.contentView = hostView
 
         self.panel = panel

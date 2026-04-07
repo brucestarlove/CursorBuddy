@@ -39,7 +39,12 @@ class CompanionManager: ObservableObject {
     @Published var activeTurnOrder: Int = 0
     @Published var serverContext: String = ""
     @Published var voiceState: CompanionVoiceState = .idle {
-        didSet { voiceStateObservable?.state = voiceState }
+        didSet {
+            voiceStateObservable?.state = voiceState
+            if oldValue == .listening && voiceState != .listening {
+                voiceStateObservable?.clearAudioLevels()
+            }
+        }
     }
 
     // MARK: - Sub-Managers (set by AppDelegate)
@@ -47,7 +52,11 @@ class CompanionManager: ObservableObject {
     var elementDetector: ElementLocationDetector?
     var selectedTextMonitor: SelectedTextMonitor?
     var pttOverlayManager: GlobalPushToTalkOverlayManager?
-    var voiceStateObservable: VoiceStateObservable?
+    var voiceStateObservable: VoiceStateObservable? {
+        didSet { subscribeToAudioLevels() }
+    }
+
+    private var audioLevelCancellable: AnyCancellable?
 
     // MARK: - Lazy Sub-Managers
 
@@ -66,6 +75,18 @@ class CompanionManager: ObservableObject {
     lazy var screenCapture: CompanionScreenCapture = {
         CompanionScreenCapture()
     }()
+
+    // MARK: - Audio Level → Waveform Bridge
+
+    private func subscribeToAudioLevels() {
+        audioLevelCancellable?.cancel()
+        guard let vsObs = voiceStateObservable else { return }
+        audioLevelCancellable = dictationManager.$audioPowerLevel
+            .receive(on: RunLoop.main)
+            .sink { [weak vsObs] level in
+                vsObs?.pushAudioLevel(level)
+            }
+    }
 
     // MARK: - Session Control
 

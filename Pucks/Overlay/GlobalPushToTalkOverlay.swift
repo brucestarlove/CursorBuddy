@@ -87,15 +87,12 @@ private struct GlobalPushToTalkOverlayView: View {
                     .foregroundColor(.white.opacity(0.85))
             }
             .padding(16)
-            .background(
+            .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color.black.opacity(0.5))
-                    )
-            )
-            .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 6)
+                    .fill(.clear)
+                    .glassEffect(.regular)
+            }
+            .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
             .transition(.opacity.combined(with: .scale(scale: 0.9)))
             .allowsHitTesting(false)
         }
@@ -173,6 +170,8 @@ final class GlobalPushToTalkOverlayManager {
         let hostView = NSHostingView(
             rootView: GlobalPushToTalkOverlayView(viewModel: viewModel)
         )
+        hostView.wantsLayer = true
+        hostView.layer?.backgroundColor = .clear
         panel.contentView = hostView
 
         self.panel = panel
