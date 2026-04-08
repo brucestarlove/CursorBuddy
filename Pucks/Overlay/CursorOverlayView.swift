@@ -25,6 +25,11 @@ struct CursorOverlayView: View {
         screenFrame.contains(mouseTracker.mouseLocation)
     }
 
+    /// True when the animated navigation cursor is assigned to this screen.
+    private var isNavigationOnThisScreen: Bool {
+        detector.navigationScreenFrame == screenFrame
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -35,36 +40,25 @@ struct CursorOverlayView: View {
                 // Only render the cursor on the screen where the mouse actually is.
                 // During navigation (flight animation), always show on this screen
                 // since the detector manages its own coordinate space.
-                let shouldShow = isCursorOnThisScreen || detector.isNavigating
+                let shouldShow = isCursorOnThisScreen || (detector.isNavigating && isNavigationOnThisScreen)
 
-                // ── Listening/Processing chip (replaces cursor when active) ──
-                if shouldShow && (voiceState.state == .listening || voiceState.state == .thinking) {
-                    HStack(spacing: 6) {
-                        if voiceState.state == .listening {
-                            AudioWaveformView(levels: voiceState.audioLevels)
-                                .frame(width: 48, height: 16)
-                            Text("Listening...")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundColor(.white)
-                        } else {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                            Text("Thinking...")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background {
-                        Capsule()
-                            .fill(.clear)
-                            .glassEffect(.regular)
-                    }
-                    .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
-                    .position(x: pos.x + 50, y: pos.y - 10)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: pos)
+                // ── Listening: just the waveform, no text ──
+                if shouldShow && voiceState.state == .listening {
+                    AudioWaveformView(levels: voiceState.audioLevels)
+                        .frame(width: 48, height: 16)
+                        .shadow(color: .blue.opacity(0.5), radius: 6, x: 0, y: 0)
+                        .position(x: pos.x + 40, y: pos.y - 6)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: pos)
+                }
+
+                // ── Thinking: just the spinner, no text ──
+                if shouldShow && voiceState.state == .thinking {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                        .shadow(color: .blue.opacity(0.4), radius: 6, x: 0, y: 0)
+                        .position(x: pos.x + 30, y: pos.y - 6)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: pos)
                 }
 
                 // ── Suggestion chip when text is selected ──

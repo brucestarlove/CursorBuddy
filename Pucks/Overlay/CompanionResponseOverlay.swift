@@ -61,21 +61,31 @@ struct CompanionResponseOverlayView: View {
 
     var body: some View {
         if viewModel.isVisible {
-            Text(viewModel.streamingResponseText)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.clear)
-                        .glassEffect(.regular)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(viewModel.streamingResponseText)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id("responseText")
                 }
-                .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
-                .frame(maxWidth: 360, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .opacity(viewModel.opacity)
-                .allowsHitTesting(false)
+                .onChange(of: viewModel.streamingResponseText) {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("responseText", anchor: .bottom)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: 360, maxHeight: 200, alignment: .topLeading)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(.regular)
+            }
+            .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
+            .opacity(viewModel.opacity)
+            .allowsHitTesting(false)
         }
     }
 }

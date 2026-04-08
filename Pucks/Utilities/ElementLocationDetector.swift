@@ -27,6 +27,7 @@ final class ElementLocationDetector: ObservableObject {
     @Published var detectedElementScreenLocation: CGPoint?
     @Published var detectedElementBubbleText: String?
     @Published var detectedElementDisplayFrame: CGRect?
+    @Published var navigationScreenFrame: CGRect?
 
     // MARK: - Navigation bubble
 
@@ -115,6 +116,7 @@ final class ElementLocationDetector: ObservableObject {
     func navigateTo(point: CGPoint, label: String? = nil) {
         detectedElementScreenLocation = point
         detectedElementBubbleText = label
+        navigationScreenFrame = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })?.frame
 
         // Start flying from current position
         cursorPositionWhenNavigationStarted = cursorPosition
@@ -145,6 +147,7 @@ final class ElementLocationDetector: ObservableObject {
         // Use the screen actually containing the cursor, not always the main screen.
         // Coordinates must be in the overlay's local space (origin at top-left of that screen).
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main else { return }
+        navigationScreenFrame = screen.frame
 
         let target = CGPoint(
             x: mouseLocation.x - screen.frame.minX,
@@ -167,6 +170,7 @@ final class ElementLocationDetector: ObservableObject {
         detectedElementScreenLocation = nil
         detectedElementBubbleText = nil
         detectedElementDisplayFrame = nil
+        navigationScreenFrame = nil
         cursorOpacity = 0.0
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 0.5
@@ -260,6 +264,7 @@ final class ElementLocationDetector: ObservableObject {
             if isReturningToCursor {
                 isNavigating = false
                 isReturningToCursor = false
+                navigationScreenFrame = nil
                 triangleRotationDegrees = -35.0
             } else {
                 showBubbleAtTarget()

@@ -409,7 +409,13 @@ struct CompanionPanelView: View {
             Spacer()
 
             Button {
-                SettingsWindowController.shared.show(tab: .permissions)
+                SettingsWindowController.shared.show()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("settingsTabChanged"),
+                        object: SettingsTab.permissions
+                    )
+                }
             } label: {
                 Text("Fix")
                     .font(.system(size: 11, weight: .semibold))
@@ -943,7 +949,13 @@ struct CompanionPanelView: View {
     private func toggleRecording() {
         checkAllPermissions()
         guard allPermissionsGranted else {
-            SettingsWindowController.shared.show(tab: .permissions)
+            SettingsWindowController.shared.show()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                NotificationCenter.default.post(
+                    name: Notification.Name("settingsTabChanged"),
+                    object: SettingsTab.permissions
+                )
+            }
             return
         }
 
