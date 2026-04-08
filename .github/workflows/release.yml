@@ -1,0 +1,152 @@
+name: Release Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  APP_NAME: CursorBuddy
+  BUNDLE_ID: com.cursorbuddy.app
+  SCHEME: CursorBuddy
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build Release
+        run: |
+          swift build -c release
+
+      - name: Create app bundle
+        run: |
+          APP_DIR="${APP_NAME}.app/Contents"
+          mkdir -p "${APP_DIR}/MacOS" "${APP_DIR}/Resources"
+          
+          cp .build/release/${APP_NAME} "${APP_DIR}/MacOS/${APP_NAME}"
+          cp CursorBuddy/Info.plist "${APP_DIR}/Info.plist"
+          cp CursorBuddy/Resources/* "${APP_DIR}/Resources/" 2>/dev/null || true
+
+      - name: Import signing certificate
+        if: env.MAC_CERT_P12_BASE64 != ''
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          
+          # Import certificate
+          echo "$MAC_CERT_P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 \
+            -P "$MAC_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          
+          # Find signing identity
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | sed 's/.*"//; s/"$//')
+          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      - name: Sign app bundle
+        if: env.SIGNING_IDENTITY != ''
+        run: |
+          # Sign nested binaries first
+          find "${APP_NAME}.app/Contents" \
+            \( -name "*.framework" -o -name "*.dylib" -o -name "*.bundle" -o -name "*.xpc" -o -perm -111 \) \
+            -print0 | sort -z | while IFS= read -r -d '' path; do
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --timestamp --options runtime \
+              --entitlements CursorBuddy/CursorBuddy.entitlements \
+              "$path"
+          done
+          
+          # Sign the app
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --timestamp --options runtime \
+            --entitlements CursorBuddy/CursorBuddy.entitlements \
+            "${APP_NAME}.app"
+          
+          # Verify
+          codesign --verify --deep --strict --verbose=2 "${APP_NAME}.app"
+
+      - name: Create DMG
+        run: |
+          mkdir -p dmg_staging
+          cp -R "${APP_NAME}.app" dmg_staging/
+          hdiutil create \
+            -volname "$APP_NAME" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            "${APP_NAME}-macOS.dmg"
+
+      - name: Create ZIP
+        run: |
+          ditto -c -k --keepParent "${APP_NAME}.app" "${APP_NAME}-macOS.zip"
+
+      - name: Notarize DMG
+        if: env.SIGNING_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
+            xcrun notarytool submit "${APP_NAME}-macOS.dmg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            
+            xcrun stapler staple "${APP_NAME}-macOS.dmg"
+            echo "✅ Notarization complete"
+          else
+            echo "⚠️ Skipping notarization (missing credentials)"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursorBuddy-release
+          path: |
+            CursorBuddy-macOS.dmg
+            CursorBuddy-macOS.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            CursorBuddy-macOS.dmg
+            CursorBuddy-macOS.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi

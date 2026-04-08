@@ -1,23 +1,23 @@
 #!/bin/bash
 #
-# Build a distributable Release archive for Pucks.
+# Build a distributable Release archive for CursorBuddy.
 # Optional notarization is enabled when NOTARY_PROFILE is set.
 #
 # Usage:
 #   ./release-build.sh
 #   DEVELOPER_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./release-build.sh
-#   NOTARY_PROFILE="pucks-notary" ./release-build.sh
+#   NOTARY_PROFILE="cursorbuddy-notary" ./release-build.sh
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE_PATH="$ROOT_DIR/.swiftpm/xcode/package.xcworkspace"
-SCHEME="Pucks"
+SCHEME="CursorBuddy"
 CONFIGURATION="Release"
-APP_NAME="Pucks"
-BUNDLE_ID="com.pucksapp.pucks"
-ENTITLEMENTS_PATH="$ROOT_DIR/Pucks/Pucks.entitlements"
-INFO_PLIST_PATH="$ROOT_DIR/Pucks/Info.plist"
+APP_NAME="CursorBuddy"
+BUNDLE_ID="com.cursorbuddy.app"
+ENTITLEMENTS_PATH="$ROOT_DIR/CursorBuddy/CursorBuddy.entitlements"
+INFO_PLIST_PATH="$ROOT_DIR/CursorBuddy/Info.plist"
 
 BUILD_ROOT="$ROOT_DIR/.build/release"
 DERIVED_DATA_PATH="$BUILD_ROOT/DerivedData"
@@ -46,7 +46,7 @@ if [ -z "$DEVELOPER_IDENTITY" ]; then
     exit 1
 fi
 
-echo "━━━ Building Pucks Release Archive ━━━"
+echo "━━━ Building CursorBuddy Release Archive ━━━"
 echo "Workspace: $WORKSPACE_PATH"
 echo "Signing identity: $DEVELOPER_IDENTITY"
 if [ -n "$NOTARY_PROFILE" ]; then

@@ -4,7 +4,6 @@
 .LSOverride
 
 # Xcode
-*.xcodeproj/
 xcuserdata/
 *.xcuserstate
 *.xccheckout
@@ -17,8 +16,11 @@ DerivedData/
 
 # Swift Package Manager
 .build/
-.swiftpm/
-*.resolved
+.swiftpm/xcode/xcuserdata/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# Keep shared schemes for Xcode Cloud
+# .swiftpm/xcode/xcshareddata/ is tracked
 
 # Credentials / secrets
 .env
@@ -29,3 +31,8 @@ DerivedData/
 .idea/
 *.swp
 *.swo
+
+# Build artifacts
+*.dmg
+dmg_staging/
+pico.save

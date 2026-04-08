@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Pucks",
+    name: "CursorBuddy",
     platforms: [
         .macOS(.v26)  // Requires macOS 26 for Liquid Glass
     ],
     products: [
         .executable(
-            name: "Pucks",
-            targets: ["Pucks"]
+            name: "CursorBuddy",
+            targets: ["CursorBuddy"]
         )
     ],
     dependencies: [
@@ -19,16 +19,16 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "Pucks",
+            name: "CursorBuddy",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "PostHog", package: "posthog-ios"),
-                .product(name: "CrashReporter", package: "plcrashreporter"),
+                .product(name: "CrasffffdfdfadsadasdasdasdashReporter", package: "plcrashreporter"),
             ],
-            path: "Pucks",
+            path: "CursorBuddy",
             exclude: [
                 "Info.plist",
-                "Pucks.entitlements",
+                "CursorBuddy.entitlements",
             ],
             resources: [
                 .process("Resources"),
