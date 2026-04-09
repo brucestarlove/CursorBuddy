@@ -37,6 +37,8 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const MAX_TTS_PREFETCH_AHEAD = 2;
+
 class VoiceResponsePipeline {
   /**
    * @param {object} opts
@@ -74,8 +76,8 @@ class VoiceResponsePipeline {
       this.buffer = extracted.remainder;
       for (const item of extracted.sentences) {
         this.sentences.push(item);
-        this._prefetchTTS(this.sentences.length - 1);
       }
+      this._ensurePrefetchWindow(0);
     }
   }
 
@@ -91,10 +93,11 @@ class VoiceResponsePipeline {
       const extracted = this._extractSentences(this.buffer, true);
       for (const item of extracted.sentences) {
         this.sentences.push(item);
-        this._prefetchTTS(this.sentences.length - 1);
       }
       this.buffer = "";
     }
+
+    this._ensurePrefetchWindow(0);
 
     // Start synchronized playback
     this._playSynchronized();
@@ -184,6 +187,7 @@ class VoiceResponsePipeline {
    * Start TTS for a sentence immediately (parallel prefetch).
    */
   _prefetchTTS(index) {
+    if (this.prefetchPromises.has(index)) return;
     const sentence = this.sentences[index];
     if (!sentence || !sentence.text.trim()) return;
 
@@ -199,6 +203,13 @@ class VoiceResponsePipeline {
     }).catch(() => null);
 
     this.prefetchPromises.set(index, promise);
+  }
+
+  _ensurePrefetchWindow(currentIndex) {
+    const lastIndex = Math.min(this.sentences.length - 1, currentIndex + MAX_TTS_PREFETCH_AHEAD - 1);
+    for (let i = currentIndex; i <= lastIndex; i++) {
+      this._prefetchTTS(i);
+    }
   }
 
   /**
@@ -222,6 +233,8 @@ class VoiceResponsePipeline {
 
     for (let i = 0; i < this.sentences.length; i++) {
       if (this.cancelled) break;
+
+      this._ensurePrefetchWindow(i);
 
       const audioPromise = this.prefetchPromises.get(i);
       if (!audioPromise) continue;

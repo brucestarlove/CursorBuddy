@@ -89,6 +89,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;f
 .tab-page{padding:0.9rem;overflow-y:auto;display:none;position:absolute;inset:0}
 .tab-page.active{display:block}
 #page-chat.active{padding:0;display:flex;flex-direction:column}
+.modal-backdrop{position:absolute;inset:0;background:rgba(3,10,14,0.82);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;z-index:40;padding:18px}
+.modal-shell{width:min(920px,100%);max-height:100%;background:rgba(9,23,29,0.98);border:1px solid rgba(255,255,255,0.08);border-radius:18px;display:flex;flex-direction:column;overflow:hidden}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.08);color:#dbeafe}
+.modal-title{font-size:0.95rem;font-weight:600}
+.modal-close{width:28px;height:28px;border:none;border-radius:8px;background:transparent;color:#9fb3bd;cursor:pointer}
+.modal-close:hover{background:rgba(255,255,255,0.06);color:#fff}
+.modal-body{overflow:auto;padding:14px;display:flex;flex-direction:column;gap:14px}
+.shot-card{padding:12px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.02)}
+.shot-meta{font-size:0.8rem;color:#c7d7df;margin-bottom:10px}
+.shot-card img{display:block;max-width:100%;height:auto;margin:0 auto;border-radius:8px}
 .chat-thinking-chip{display:inline-flex;align-items:center;gap:6px;width:max-content;max-width:100%;padding:4px 10px;border-radius:999px;border:1px solid rgba(59,130,246,0.18);background:rgba(59,130,246,0.08);color:#93c5fd;font-size:0.72rem;font-weight:500;line-height:1;letter-spacing:0.2px}
 .chat-thinking-chip.is-live{animation:chat-thinking-pulse 1.8s ease infinite}
 .chat-thinking-icon{font-size:0.68rem;opacity:0.9}
@@ -205,12 +215,23 @@ button.btn.active{background:var(--accent-bg,rgba(59,130,246,0.18));border-color
             <div class="composer-toolbar">
               <div class="composer-actions">
                 <button class="composer-btn" id="btn-attach" onclick="captureAndShow()" title="Screenshot"><i class="icon-image"></i></button>
+                <button class="composer-btn" id="btn-last-shot" onclick="showLastInferenceScreens()" title="Last AI Screens"><i class="icon-monitor"></i></button>
                 <button class="composer-btn" id="btn-mic" onclick="toggleMic()" title="Push to talk"><i class="icon-mic" id="mic-icon"></i></button>
                 <button class="composer-btn" id="btn-clear" onclick="clearChat()" title="Clear"><i class="icon-trash-2"></i></button>
               </div>
               <button class="composer-send" id="chat-send" onclick="chatSend()" title="Send (Enter)"><i class="icon-arrow-up"></i></button>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="modal-backdrop" id="shots-modal">
+        <div class="modal-shell">
+          <div class="modal-header">
+            <div class="modal-title">Last AI Screens</div>
+            <button class="modal-close" onclick="closeShotsModal()" title="Close">✕</button>
+          </div>
+          <div class="modal-body" id="shots-modal-body"></div>
         </div>
       </div>
 
@@ -1614,11 +1635,59 @@ function renderAttachments() {
   container.style.display = 'flex';
   container.innerHTML = pendingAttachments.map((a, i) =>
     '<div style="position:relative;border-radius:8px;overflow:hidden;border:1px solid rgba(59,130,246,0.2)">' +
-    '<img src="' + a.thumbnailDataUrl + '" style="height:48px;display:block;border-radius:7px">' +
+    '<img src="' + a.thumbnailDataUrl + '" style="height:48px;display:block;border-radius:7px;cursor:pointer" onclick="openAttachmentPreview(' + i + ')" title="' + (a.label || 'attachment').replace(/"/g, '&quot;') + '">' +
     '<div style="position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,0.7);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;cursor:pointer" onclick="removeAttachment(' + i + ')">\u2715</div>' +
-    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);font-size:8px;color:#ADB5B2;padding:1px 4px;text-align:center">' + a.width + '\u00d7' + a.height + '</div>' +
+    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);font-size:8px;color:#ADB5B2;padding:1px 4px;text-align:center">' + (a.label ? (a.label.length > 28 ? a.label.slice(0, 25) + '...' : a.label) + ' · ' : '') + a.width + '\u00d7' + a.height + '</div>' +
     '</div>'
   ).join('');
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function openAttachmentPreview(idx) {
+  const attachment = pendingAttachments[idx];
+  if (!attachment) return;
+  renderShotsModal([attachment], attachment.label || 'Attachment');
+}
+
+function closeShotsModal() {
+  const modal = document.getElementById('shots-modal');
+  const body = document.getElementById('shots-modal-body');
+  if (body) body.innerHTML = '';
+  if (modal) modal.style.display = 'none';
+}
+
+function renderShotsModal(shots, title) {
+  const modal = document.getElementById('shots-modal');
+  const body = document.getElementById('shots-modal-body');
+  const titleEl = modal?.querySelector('.modal-title');
+  if (!modal || !body || !titleEl) return;
+  titleEl.textContent = title || 'Last AI Screens';
+  body.innerHTML = shots.map((shot) =>
+    '<div class="shot-card">' +
+    '<div class="shot-meta">' + escapeHtml(shot.label || 'Inference screenshot') + ' · ' + shot.width + '×' + shot.height + '</div>' +
+    '<img src="data:image/jpeg;base64,' + shot.fullBase64 + '">' +
+    '</div>'
+  ).join('');
+  modal.style.display = 'flex';
+}
+
+async function showLastInferenceScreens() {
+  if (!api.getLastInferenceScreens) return;
+  const screens = await api.getLastInferenceScreens().catch(() => []);
+  const usableScreens = Array.isArray(screens)
+    ? screens.filter((screen) => screen && screen.width > 0 && screen.height > 0 && screen.fullBase64)
+    : [];
+  if (usableScreens.length === 0) {
+    appendChatMsg('system', 'No inference screenshots are available yet.');
+    return;
+  }
+  renderShotsModal(usableScreens, 'Last AI Screens');
 }
 
 if (api.onScreenshotIntercepted) {

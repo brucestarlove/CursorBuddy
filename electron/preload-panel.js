@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("panelAPI", {
 
   // Screen capture
   captureScreens: () => ipcRenderer.invoke("capture-screens"),
+  getLastInferenceScreens: () => ipcRenderer.invoke("inference:last-screens"),
 
   // Inference
   runInference: (opts) => ipcRenderer.send("inference:run", opts),

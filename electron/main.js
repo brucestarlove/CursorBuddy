@@ -352,6 +352,17 @@ ipcMain.handle("capture-screens", async () => {
   }
 });
 
+ipcMain.handle("inference:last-screens", () => {
+  return lastCapturedScreens.map((screen) => ({
+    label: screen.label,
+    isCursorScreen: screen.isCursorScreen,
+    width: screen.screenshotWidthPx,
+    height: screen.screenshotHeightPx,
+    thumbnailDataUrl: `data:image/jpeg;base64,${screen.imageDataBase64}`,
+    fullBase64: screen.imageDataBase64,
+  }));
+});
+
 // ── IPC: Inference ────────────────────────────────────────
 
 /** Last captured screens — kept so we can scale POINT coords after inference */
@@ -400,6 +411,17 @@ async function executeInference({ transcript, provider, model, attachments, voic
       });
     }
     lastCapturedScreens = screens;
+    log.event("capture:attached_to_inference", {
+      screenCount: screens.length,
+      screens: screens.map((s, i) => ({
+        index: i + 1,
+        label: s.label,
+        isCursorScreen: !!s.isCursorScreen,
+        screenshot: `${s.screenshotWidthPx}x${s.screenshotHeightPx}`,
+        display: `${s.displayWidthPx}x${s.displayHeightPx}`,
+        displayOrigin: `${s.displayX},${s.displayY}`,
+      })),
+    });
 
     let fullResponseText = "";
     const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];

@@ -231,6 +231,14 @@ async function runAnthropicInference(model, transcript, screens, settings, onChu
   }
 
   const executeToolFn = createToolExecutor(mcpTools);
+  log.event("inference:request_shape", {
+    provider: "anthropic",
+    model: requestParams.model,
+    visionScreensSent: screens.length,
+    toolCount: mcpTools?.length || 0,
+    historyTurns: conversationHistory.length,
+    screenLabels: screens.map((s) => s.label),
+  });
 
   // Run inference with tool loop (may need multiple rounds)
   let currentMessages = [...messages];
@@ -305,6 +313,7 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
       break;
   }
 
+  model = await resolveLocalVisionModel(provider, model, baseURL);
   const client = getOpenAIClient(baseURL, apiKey);
 
   // Build messages
@@ -316,7 +325,14 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
 
   // Current message — with vision if screenshots provided and model supports it
   const userContent = [];
-  if (screens.length > 0 && (provider === "openai" || model.includes("llava") || model.includes("vision"))) {
+  const modelName = model || "gpt-4o";
+  const sendsVision = screens.length > 0 && (
+    provider === "openai" ||
+    modelName.includes("llava") ||
+    modelName.includes("vision") ||
+    modelName.includes("gemma")
+  );
+  if (sendsVision) {
     for (const scr of screens) {
       userContent.push({
         type: "image_url",
@@ -332,7 +348,7 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
 
   // Build request params
   const requestParams = {
-    model: model || "gpt-4o",
+    model: modelName,
     messages,
     max_tokens: settings.maxTokens || 1024,
     temperature: settings.temperature || 0.7,
@@ -349,6 +365,17 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
     // o-series models don't use temperature
     delete requestParams.temperature;
   }
+
+  log.event("inference:request_shape", {
+    provider,
+    model: requestParams.model,
+    sendsVision,
+    visionScreensSent: sendsVision ? screens.length : 0,
+    toolCount: mcpTools?.length || 0,
+    historyTurns: conversationHistory.length,
+    baseURL,
+    screenLabels: screens.map((s) => s.label),
+  });
 
   const stream = await client.chat.completions.create(requestParams);
 
@@ -367,6 +394,45 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
   onChunk({ type: "done" });
   addToHistory(transcript, fullText);
   return fullText;
+}
+
+async function resolveLocalVisionModel(provider, requestedModel, baseURL) {
+  if (provider !== "ollama" && provider !== "lmstudio") {
+    return requestedModel;
+  }
+
+  const fallbackBadPrefixes = ["claude-", "gpt-", "o3", "o4", "computer-use-preview"];
+  const looksWrongProvider = !requestedModel || fallbackBadPrefixes.some((prefix) => String(requestedModel).startsWith(prefix));
+
+  try {
+    const modelListUrl = provider === "ollama"
+      ? baseURL.replace(/\/v1$/, "/api/tags")
+      : baseURL.replace(/\/v1$/, "/v1/models");
+    const res = await fetch(modelListUrl);
+    if (!res.ok) return requestedModel;
+    const data = await res.json();
+    const availableModels = provider === "ollama"
+      ? (data.models || []).map((m) => m.name || m.model).filter(Boolean)
+      : (data.data || []).map((m) => m.id).filter(Boolean);
+    if (availableModels.length === 0) return requestedModel;
+
+    if (availableModels.includes(requestedModel)) {
+      return requestedModel;
+    }
+
+    const chosenModel = availableModels[0];
+    if (looksWrongProvider || !requestedModel) {
+      log.event("inference:model_autocorrect", {
+        provider,
+        requestedModel,
+        chosenModel,
+        reason: "requested_model_invalid_for_local_provider",
+      });
+      return chosenModel;
+    }
+  } catch (_) {}
+
+  return requestedModel;
 }
 
 // ── Computer Use ──────────────────────────────────────────
