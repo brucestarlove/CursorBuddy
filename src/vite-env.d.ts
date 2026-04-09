@@ -32,6 +32,7 @@ interface ElectronAPI {
   // Push-to-talk
   onPushToTalk: (callback: (action: string) => void) => () => void;
   stopPushToTalk: () => void;
+  onVoiceAudioChunk: (callback: (data: { audioBase64?: string; mimeType?: string }) => void) => () => void;
 
   // TTS
   speak: (text: string) => Promise<{ ok: boolean; audioBase64?: string; mimeType?: string; error?: string }>;

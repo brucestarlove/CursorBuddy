@@ -25,6 +25,7 @@ class AssemblyAISession {
     this.fullText = "";
     this.turns = {};
     this.activeTurnText = "";
+    this.nextSyntheticTurnOrder = 0;
   }
 
   async start() {
@@ -62,11 +63,16 @@ class AssemblyAISession {
   _handleMessage(raw) {
     try {
       const msg = JSON.parse(raw);
-      if (msg.type === "turn") {
-        const text = (msg.transcript || "").trim();
-        const turnOrder = msg.turn_order ?? 0;
+      const msgType = String(msg.type || "").toLowerCase();
+      if (msgType === "turn") {
+        const text = String(msg.transcript || msg.text || "").trim();
+        const parsedTurnOrder = Number.parseInt(String(msg.turn_order), 10);
+        const turnOrder = Number.isFinite(parsedTurnOrder)
+          ? parsedTurnOrder
+          : this.nextSyntheticTurnOrder;
         if (msg.end_of_turn || msg.turn_is_formatted) {
           if (text) this.turns[turnOrder] = text;
+          this.nextSyntheticTurnOrder = Math.max(this.nextSyntheticTurnOrder, turnOrder + 1);
           this.activeTurnText = "";
         } else {
           this.activeTurnText = text;
@@ -76,14 +82,18 @@ class AssemblyAISession {
         if (msg.end_of_turn || msg.turn_is_formatted) {
           this.onFinal(this.fullText);
         }
-      } else if (msg.type === "error") {
+      } else if (msgType === "error") {
         this.onError(new Error(msg.error || msg.message || "AssemblyAI error"));
       }
     } catch (_) {}
   }
 
   _compose() {
-    const parts = Object.keys(this.turns).sort((a, b) => a - b).map(k => this.turns[k]);
+    const parts = Object.keys(this.turns)
+      .map((k) => Number.parseInt(k, 10))
+      .filter((k) => Number.isFinite(k))
+      .sort((a, b) => a - b)
+      .map((k) => this.turns[k]);
     if (this.activeTurnText) parts.push(this.activeTurnText);
     return parts.join(" ");
   }

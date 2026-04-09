@@ -112,4 +112,57 @@ export function useElectronBridge(): void {
       stopMicCapture();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isElectronEnvironment() || !window.electronAPI?.onVoiceAudioChunk) return;
+
+    const audioQueue: string[] = [];
+    let currentAudio: HTMLAudioElement | null = null;
+
+    const playNext = () => {
+      if (currentAudio || audioQueue.length === 0) return;
+      const nextUrl = audioQueue.shift();
+      if (!nextUrl) return;
+      currentAudio = new Audio(nextUrl);
+      currentAudio.onended = () => {
+        URL.revokeObjectURL(nextUrl);
+        currentAudio = null;
+        playNext();
+      };
+      currentAudio.onerror = () => {
+        URL.revokeObjectURL(nextUrl);
+        currentAudio = null;
+        playNext();
+      };
+      currentAudio.play().catch(() => {
+        URL.revokeObjectURL(nextUrl);
+        currentAudio = null;
+        playNext();
+      });
+    };
+
+    const unsubscribe = window.electronAPI.onVoiceAudioChunk((data) => {
+      if (!data.audioBase64) return;
+      try {
+        const binary = atob(data.audioBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: data.mimeType || "audio/mpeg" });
+        audioQueue.push(URL.createObjectURL(blob));
+        playNext();
+      } catch (_) {}
+    });
+
+    return () => {
+      unsubscribe();
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+      }
+      while (audioQueue.length > 0) {
+        const url = audioQueue.shift();
+        if (url) URL.revokeObjectURL(url);
+      }
+    };
+  }, []);
 }

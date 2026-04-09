@@ -12,6 +12,7 @@
 const Anthropic = require("@anthropic-ai/sdk").default;
 const OpenAI = require("openai").default;
 const { extractToolResultText } = require("../lib/tool-result-text.js");
+const { parsePointingCoordinates } = require("../lib/point-parser.js");
 const log = require("../lib/session-logger.js");
 
 const SYSTEM_PROMPT = `you're cursorbuddy, a friendly always-on companion that lives in the user's menu bar. the user speaks to you via push-to-talk or types in the chat panel. you can see their screen(s) and any screenshots they've attached. your reply will be spoken aloud via text-to-speech AND displayed in a chat panel, so write conversationally. this is an ongoing conversation — you remember everything they've said before.
@@ -412,6 +413,9 @@ async function runComputerUse(opts) {
       return runAnthropicComputerUse(opts);
     case "openai":
       return runOpenAIComputerUse(opts);
+    case "ollama":
+    case "lmstudio":
+      return runOpenAICompatibleVisionComputerUse(provider, opts);
     default:
       throw new Error(`Unknown CU provider: ${provider}`);
   }
@@ -626,6 +630,87 @@ async function runOpenAIComputerUse(opts) {
   console.log("[CU] OpenAI: no actionable output");
   onChunk?.({ type: "tool_result", name: "computer_use", result: "No element detected" });
   return { action: "none", text: "No element detected" };
+}
+
+async function runOpenAICompatibleVisionComputerUse(provider, opts) {
+  const { userQuestion, assistantResponse, screenCapture, settings, onChunk } = opts;
+
+  let baseURL, apiKey, model;
+  switch (provider) {
+    case "ollama":
+      baseURL = (settings.ollamaUrl || "http://localhost:11434") + "/v1";
+      apiKey = "ollama";
+      model = settings.cuModel || settings.chatModel || "llava";
+      break;
+    case "lmstudio":
+      baseURL = (settings.lmstudioUrl || "http://localhost:1234") + "/v1";
+      apiKey = "lmstudio";
+      model = settings.cuModel || settings.chatModel;
+      break;
+    default:
+      throw new Error(`Unsupported provider for vision CU fallback: ${provider}`);
+  }
+
+  if (!model) throw new Error(`No ${provider} computer-use model configured`);
+
+  const client = getOpenAIClient(baseURL, apiKey);
+  const width = screenCapture.screenshotWidthPx;
+  const height = screenCapture.screenshotHeightPx;
+
+  const prompt = [
+    `The user asked: "${userQuestion}"`,
+    assistantResponse
+      ? `The assistant already responded: "${assistantResponse.slice(0, 500)}"`
+      : "Look at the screenshot and identify the specific UI element the user should interact with.",
+    `The screenshot dimensions are ${width}x${height}.`,
+    "Return exactly one tag and nothing else.",
+    "If you find the element, return [POINT:x,y:label] using integer screenshot pixel coordinates.",
+    "If there is no specific element to point to, return [POINT:none].",
+  ].join("\n\n");
+
+  const response = await client.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${screenCapture.imageDataBase64}` },
+          },
+          { type: "text", text: prompt },
+        ],
+      },
+    ],
+    max_tokens: 128,
+    temperature: 0,
+    stream: false,
+  });
+
+  const text = response.choices?.[0]?.message?.content?.trim() || "[POINT:none]";
+  const parsed = parsePointingCoordinates(text);
+  if (!parsed.coordinate) {
+    onChunk?.({ type: "tool_result", name: "computer_use", result: "No element detected" });
+    return { action: "none", text };
+  }
+
+  const calibratedPoint = screenshotPointToScreenCoords(
+    parsed.coordinate.x,
+    parsed.coordinate.y,
+    screenCapture
+  );
+  const result = {
+    action: "point",
+    coordinate: [Math.round(calibratedPoint.x), Math.round(calibratedPoint.y)],
+    pointCoordinate: [parsed.coordinate.x, parsed.coordinate.y],
+    label: parsed.elementLabel || "element",
+  };
+  onChunk?.({
+    type: "tool_result",
+    name: "computer_use",
+    result: `${provider} vision point at (${result.coordinate})`,
+  });
+  return result;
 }
 
 module.exports = { runInference, runComputerUse, clearHistory, SYSTEM_PROMPT };

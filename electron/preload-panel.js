@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld("panelAPI", {
     return () => ipcRenderer.removeListener("inference:chunk", handler);
   },
   clearHistory: () => ipcRenderer.send("inference:clear-history"),
+  loadChatHistory: () => ipcRenderer.invoke("chat:history-load"),
+  appendChatHistory: (role, text) => ipcRenderer.invoke("chat:history-append", role, text),
+  replaceLastChatHistory: (role, text) => ipcRenderer.invoke("chat:history-replace-last", role, text),
+  clearChatHistory: () => ipcRenderer.invoke("chat:history-clear"),
 
   // STT (speech-to-text)
   startSTT: (provider) => ipcRenderer.invoke("stt:start", provider),

@@ -68,6 +68,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   stopPushToTalk: () => ipcRenderer.send("push-to-talk:stop"),
 
+  /** Voice audio chunks */
+  onVoiceAudioChunk: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on("voice:audio-chunk", handler);
+    return () => ipcRenderer.removeListener("voice:audio-chunk", handler);
+  },
+
   /** TTS */
   speak: (text) => ipcRenderer.invoke("tts:speak", text),
 });

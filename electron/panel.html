@@ -1066,6 +1066,8 @@ const PROVIDERS = {
 const CU_PROVIDERS = {
   anthropic: { name:'Anthropic', models:['claude-sonnet-4-6','claude-opus-4-6','claude-opus-4-5'] },
   openai:    { name:'OpenAI',    models:['computer-use-preview'] },
+  ollama:    { name:'Ollama',    models:[] },
+  lmstudio:  { name:'LM Studio', models:[] },
 };
 const SLOTS = ['chat','cu','fast','plan','tool'];
 const BUDGET_LEVELS = [
@@ -1098,14 +1100,15 @@ function populateModelDropdown(slotId, providerId) {
   const provMap = slotId === 'cu' ? CU_PROVIDERS : PROVIDERS;
   const models = provMap[providerId]?.models || [];
   const saved = settings[slotId + 'Model'];
+  const selectedModel = models.includes(saved) ? saved : (models[0] || '');
   modSel.innerHTML = '';
   models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m; opt.textContent = m;
-    if (m === saved) opt.selected = true;
+    if (m === selectedModel) opt.selected = true;
     modSel.appendChild(opt);
   });
-  if (!saved && models.length) settings[slotId + 'Model'] = models[0];
+  settings[slotId + 'Model'] = selectedModel;
 }
 
 function slotProviderChanged(slotId) {
@@ -1145,7 +1148,9 @@ async function refreshLocalModels() {
   const lu = settings.lmstudioUrl || 'http://localhost:1234';
   try { const r=await fetch(ou+'/api/tags'); const d=await r.json(); PROVIDERS.ollama.models=(d.models||[]).map(m=>m.name||m.model); } catch(_) { PROVIDERS.ollama.models=['(not running)']; }
   try { const r=await fetch(lu+'/v1/models'); const d=await r.json(); PROVIDERS.lmstudio.models=(d.data||[]).map(m=>m.id); } catch(_) { PROVIDERS.lmstudio.models=['(not running)']; }
-  SLOTS.forEach(s => { if(s!=='cu') populateModelDropdown(s, document.getElementById(s+'-provider')?.value || 'anthropic'); });
+  CU_PROVIDERS.ollama.models = [...PROVIDERS.ollama.models];
+  CU_PROVIDERS.lmstudio.models = [...PROVIDERS.lmstudio.models];
+  SLOTS.forEach(s => { populateModelDropdown(s, document.getElementById(s+'-provider')?.value || 'anthropic'); });
 }
 
 // ── STT/TTS selection ─────────────────────────────────────
@@ -1633,6 +1638,7 @@ if (api.onScreenshotIntercepted) {
 let chatStreaming = false;
 let chatStreamText = '';
 let chatIsVoiceInitiated = false; // true when mic started this exchange
+let suppressChatHistorySync = false;
 
 function clearChat() {
   interruptCurrentResponse();
@@ -1648,6 +1654,7 @@ function clearChat() {
   pendingAttachments = [];
   renderAttachments();
   api.clearHistory();
+  api.clearChatHistory?.().catch(() => {});
 }
 
 function chatSend() {
@@ -1714,6 +1721,25 @@ function appendChatMsg(role, text, streaming) {
   row.appendChild(stack);
   c.appendChild(row);
   c.scrollTop = c.scrollHeight;
+  if (!streaming && !suppressChatHistorySync && api.appendChatHistory) {
+    api.appendChatHistory(role, text).catch(() => {});
+  }
+}
+
+function replaceLastChatHistory(role, text) {
+  if (suppressChatHistorySync || !api.replaceLastChatHistory) return;
+  api.replaceLastChatHistory(role, text).catch(() => {});
+}
+
+async function restoreChatHistory() {
+  if (!api.loadChatHistory) return;
+  const history = await api.loadChatHistory().catch(() => []);
+  if (!Array.isArray(history) || history.length === 0) return;
+  suppressChatHistorySync = true;
+  const container = document.getElementById('chat-messages');
+  container.innerHTML = '';
+  history.forEach((entry) => appendChatMsg(entry.role, entry.text, false));
+  suppressChatHistorySync = false;
 }
 
 function formatThinkingDuration(durationMs) {
@@ -1771,7 +1797,11 @@ if (api.onInferenceChunk) {
       chatStreamText = chunk.text;
       if (el) finalizeThinkingChip(el);
       // Strip POINT tags from live display so user never sees them
-      if (el) el.textContent = chunk.text.replace(/\s*\[POINT:[^\]]*\]\s*/g, '').trim();
+      if (el) {
+        const cleaned = chunk.text.replace(/\s*\[POINT:[^\]]*\]\s*/g, '').trim();
+        el.textContent = cleaned;
+        replaceLastChatHistory('assistant', cleaned);
+      }
       document.getElementById('chat-messages').scrollTop = 999999;
     } else if (chunk.type === 'done') {
       chatStreaming = false;
@@ -1781,6 +1811,7 @@ if (api.onInferenceChunk) {
         // Strip ALL POINT tags from displayed text (including [POINT:none])
         const cleaned = chatStreamText.replace(/\s*\[POINT:[^\]]*\]\s*/g, '').trim();
         el.textContent = cleaned;
+        replaceLastChatHistory('assistant', cleaned);
       }
       // Fly cursor only if AI is actually pointing at something
       if (chunk.scaledPoint) {
@@ -2030,7 +2061,7 @@ async function toggleMic() {
     api.requestFinalTranscript();
 
     // Wait briefly for final transcript, then stop STT
-    setTimeout(() => api.stopSTT(), 2500);
+    setTimeout(() => api.stopSTT(), 5000);
 
     // Finalize the live bubble
     if (liveBubbleEl) {
@@ -2039,6 +2070,7 @@ async function toggleMic() {
         liveBubbleEl.style.opacity = '1';
         liveBubbleEl.style.fontStyle = 'normal';
         liveBubbleEl = null;
+        api.appendChatHistory?.('user', finalText).catch(() => {});
         // Send for inference (with interruption context if needed)
         let transcript = finalText;
         if (lastInterruptedResponse) {
@@ -2128,9 +2160,8 @@ api.onTranscript(data => {
     chinText.classList.add('active');
   }
   if (data.isFinal && data.text && micRecording) {
-    status.textContent = ''; status.style.display = 'none';
+    status.textContent = 'hearing you…'; status.style.display = 'block';
     setTimeout(() => { chinText.textContent = ''; chinText.classList.remove('active'); }, 2000);
-    toggleMic(); // Auto-stop on final
   }
 });
 
@@ -2195,7 +2226,6 @@ if (api.onPushToTalk) {
           chatStreaming = true;
           chatStreamText = '';
           appendChatMsg('assistant', '', true);
-          api.runInference({ transcript: finalText, voiceMode: true });
         } else {
           liveBubbleEl.parentElement?.remove();
           liveBubbleEl = null;
@@ -2314,6 +2344,7 @@ function interruptCurrentResponse() {
 
 // ── Init ──────────────────────────────────────────────────
 loadAllSettings().then(() => {
+  restoreChatHistory();
   refreshLocalModels();
   checkCLI('claude', 'cli-claude');
   checkCLI('codex', 'cli-codex');

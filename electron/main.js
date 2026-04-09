@@ -24,6 +24,7 @@ const { getSystemTools } = require("./services/system-actions.js");
 const { sendToOverlay, sendToPanel, broadcast, setWindows, getOverlayWindow, getPanelWindow } = require("./lib/ipc-helpers.js");
 const { loadSettings, saveSettings } = require("./lib/settings-cache.js");
 const { parsePointingCoordinates } = require("./lib/point-parser.js");
+const chatHistory = require("./lib/chat-history-store.js");
 const log = require("./lib/session-logger.js");
 
 // ── Constants (must match design-tokens.ts) ───────────────────
@@ -356,12 +357,25 @@ ipcMain.handle("capture-screens", async () => {
 /** Last captured screens — kept so we can scale POINT coords after inference */
 let lastCapturedScreens = [];
 let activeVoicePipeline = null;
+chatHistory.loadHistory();
 
-ipcMain.on("inference:run", async (_event, { transcript, provider, model, attachments, voiceMode }) => {
+function appendChatHistory(role, text) {
+  chatHistory.appendMessage(role, text);
+}
+
+function replaceLastChatHistory(role, text) {
+  chatHistory.replaceLastMessage(role, text);
+}
+
+async function executeInference({ transcript, provider, model, attachments, voiceMode, historyMode = "none" }) {
   // Cancel any existing voice pipeline
   if (activeVoicePipeline) { activeVoicePipeline.cancel(); activeVoicePipeline = null; }
   try {
     const settings = loadSettings();
+    if (historyMode === "append-user") {
+      appendChatHistory("user", transcript);
+      appendChatHistory("assistant", "");
+    }
     log.event("inference:start", {
       transcript: transcript?.slice(0, 120),
       provider: provider || settings.chatProvider || "anthropic",
@@ -408,6 +422,9 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
         onSpeakEnd: () => {
           log.event("voice:speak_end");
           sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
+          if (historyMode === "append-user" && fullResponseText) {
+            replaceLastChatHistory("assistant", fullResponseText.replace(/\s*\[POINT:[^\]]*\]\s*/g, "").trim());
+          }
           broadcast("inference:chunk", { type: "done" });
         },
         onPointAt: (point) => {
@@ -429,7 +446,7 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
             if (!result) return null;
             const audioBase64 = result.audioData.toString("base64");
             const audioPayload = { type: "voice:audio", audioBase64, mimeType: result.mimeType };
-            sendToPanel("voice:audio-chunk", audioPayload);
+            sendToOverlay("voice:audio-chunk", audioPayload);
             return { audioBase64, mimeType: result.mimeType, audioSizeBytes: result.audioData.length };
           } catch (err) {
             console.error("[VoicePipeline] TTS error:", err.message);
@@ -450,6 +467,9 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
       onChunk: async (chunk) => {
         if (chunk.type === "text") {
           fullResponseText = chunk.text || "";
+          if (historyMode === "append-user") {
+            replaceLastChatHistory("assistant", fullResponseText.replace(/\s*\[POINT:[^\]]*\]\s*/g, "").trim());
+          }
         }
 
         // On done: voice pipeline handles TTS+pointing, text mode does POINT parsing
@@ -520,11 +540,22 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
     });
   } catch (err) {
     log.error("inference:error", err);
+    if (historyMode === "append-user") {
+      replaceLastChatHistory("assistant", `Error: ${err.message}`);
+    }
     broadcast("inference:chunk", { type: "error", error: err.message });
   }
+}
+
+ipcMain.on("inference:run", async (_event, { transcript, provider, model, attachments, voiceMode }) => {
+  await executeInference({ transcript, provider, model, attachments, voiceMode, historyMode: "none" });
 });
 
 ipcMain.on("inference:clear-history", () => clearHistory());
+ipcMain.handle("chat:history-load", () => chatHistory.getHistory());
+ipcMain.handle("chat:history-append", (_event, role, text) => chatHistory.appendMessage(role, text));
+ipcMain.handle("chat:history-replace-last", (_event, role, text) => chatHistory.replaceLastMessage(role, text));
+ipcMain.handle("chat:history-clear", () => chatHistory.clearHistory());
 
 // ── IPC: Transcription ────────────────────────────────────────
 
@@ -923,57 +954,12 @@ function stopPushToTalk() {
     if (pttFinalTranscript.trim()) {
       log.event("ptt:inference", { transcript: pttFinalTranscript.slice(0, 80) });
       try {
-        const screens = await captureAllScreens();
-        const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];
-        const currentSettings = loadSettings();
-        const allTools = [
-          ...getSystemTools(),
-          ...mcpClient.getAllTools(),
-          ...toolLoader.getToolList(),
-        ];
-        let fullResponseText = "";
-        let firstTextReceived = false;
-
-        await runInference({
-          provider: currentSettings.chatProvider || "anthropic",
-          model: currentSettings.chatModel || "claude-sonnet-4-6",
+        await executeInference({
           transcript: pttFinalTranscript,
-          screens,
-          settings: currentSettings,
-          mcpTools: allTools.length > 0 ? allTools : undefined,
-          onChunk: async (chunk) => {
-            if (chunk.type === "text") {
-              fullResponseText = chunk.text || "";
-              // Switch to responding on first text chunk
-              if (!firstTextReceived) {
-                firstTextReceived = true;
-                sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "responding" });
-              }
-            }
-            if (chunk.type === "done") {
-              if (fullResponseText) {
-                const parsed = parsePointingCoordinates(fullResponseText);
-                if (parsed.coordinate) {
-                  const targetScreen = parsed.screenNumber
-                    ? screens[Math.max(0, Math.min(parsed.screenNumber - 1, screens.length - 1))]
-                    : (cursorScreen || screens[0]);
-                  if (targetScreen) {
-                    const sc = screenshotPointToScreenCoords(parsed.coordinate.x, parsed.coordinate.y, targetScreen);
-                    chunk.scaledPoint = {
-                      x: Math.round(sc.x), y: Math.round(sc.y),
-                      label: parsed.elementLabel || "element",
-                      bubbleText: parsed.spokenText.length > 80
-                        ? parsed.spokenText.slice(0, 77).replace(/\s+\S*$/, "") + "\u2026"
-                        : parsed.spokenText,
-                    };
-                  }
-                }
-              }
-              // Back to idle when done
-              sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
-            }
-            broadcast("inference:chunk", chunk);
-          },
+          provider: loadSettings().chatProvider,
+          model: loadSettings().chatModel,
+          voiceMode: true,
+          historyMode: "append-user",
         });
       } catch (err) {
         log.error("ptt:inference_error", err);
@@ -985,7 +971,7 @@ function stopPushToTalk() {
       sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
     }
     sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
-  }, 2000);
+  }, 5000);
 }
 
 // Toggle push-to-talk off (called from renderer)
