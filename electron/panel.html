@@ -217,6 +217,7 @@ button.btn.active{background:var(--accent-bg,rgba(59,130,246,0.18));border-color
                 <button class="composer-btn" id="btn-attach" onclick="captureAndShow()" title="Screenshot"><i class="icon-image"></i></button>
                 <button class="composer-btn" id="btn-last-shot" onclick="showLastInferenceScreens()" title="Last AI Screens"><i class="icon-monitor"></i></button>
                 <button class="composer-btn" id="btn-mic" onclick="toggleMic()" title="Push to talk"><i class="icon-mic" id="mic-icon"></i></button>
+                <button class="composer-btn" id="btn-socratic" onclick="toggleSocraticMode()" title="Socratic teaching mode — guides you with questions instead of answers"><i class="icon-help-circle" id="socratic-icon"></i></button>
                 <button class="composer-btn" id="btn-clear" onclick="clearChat()" title="Clear"><i class="icon-trash-2"></i></button>
               </div>
               <button class="composer-send" id="chat-send" onclick="chatSend()" title="Send (Enter)"><i class="icon-arrow-up"></i></button>
@@ -774,6 +775,8 @@ async function loadAllSettings() {
 
   // Restore debug overlay if it was enabled
   restoreDebugState();
+  // Restore socratic mode button state
+  updateSocraticButton();
 }
 
 function persistSettings() {
@@ -1744,6 +1747,27 @@ let chatStreaming = false;
 let chatStreamText = '';
 let chatIsVoiceInitiated = false; // true when mic started this exchange
 let suppressChatHistorySync = false;
+
+// ── Socratic Mode Toggle ─────────────────────────────────
+function toggleSocraticMode() {
+  settings.socraticMode = !settings.socraticMode;
+  persistSettings();
+  updateSocraticButton();
+}
+
+function updateSocraticButton() {
+  const btn = document.getElementById('btn-socratic');
+  if (!btn) return;
+  if (settings.socraticMode) {
+    btn.style.color = 'var(--accent, #3b82f6)';
+    btn.style.background = 'rgba(59,130,246,0.15)';
+    btn.title = 'Socratic mode ON — click to turn off';
+  } else {
+    btn.style.color = '';
+    btn.style.background = '';
+    btn.title = 'Socratic teaching mode — guides you with questions instead of answers';
+  }
+}
 
 function clearChat() {
   interruptCurrentResponse();

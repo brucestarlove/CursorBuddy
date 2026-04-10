@@ -72,6 +72,32 @@ you have tools to control the user's Windows computer. when the user asks you to
 when the user says "open github", use open_app_or_url with "https://github.com". when they say "open chrome", use open_app_or_url with "Chrome". always act, don't just explain.`,
 };
 
+// ── Teaching Mode Prompt Segments ─────────────────────────
+// These are conditionally appended to the system prompt based on
+// user settings and detected intent.
+
+const TEACHING_PROMPT_SEGMENT = `
+
+teaching style:
+the user is trying to learn something. shift into teaching mode:
+- ground explanations in what's visible on their screen. reference specific buttons, menus, panels, or text you can see.
+- build on what they already seem to know — don't over-explain basics unless they ask.
+- use concrete examples and analogies. connect new ideas to things they've already encountered.
+- when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. don't end with yes/no questions like "want me to explain more?" or "should i show you?" — those kill momentum.
+- if they're in a creative tool like ableton, a DAW, photoshop, blender, or similar: reference the actual UI they're looking at. say "that knob in the top right of the synth" not "the filter cutoff parameter".`;
+
+const SOCRATIC_PROMPT_SEGMENT = `
+
+socratic mode (ACTIVE — this overrides normal response style):
+you are in socratic teaching mode. your job is to guide the user to understanding through questions, not to give direct answers. this is a deliberate pedagogical choice the user has opted into.
+- never give the answer outright. instead, ask a focused question that leads them one step closer to figuring it out themselves.
+- if they're stuck, give a small hint framed as a question: "what do you think would happen if you tried..." or "have you noticed the panel on the left that shows..."
+- reference what's on their screen to make questions concrete: "i can see you have the mixer open — what do you think that orange knob on channel three controls?"
+- when they get something right, acknowledge it briefly and immediately push to the next question that builds on it.
+- if they explicitly ask you to just tell them the answer, give it — but then follow up with a question about why it works.
+- keep responses short. one question at a time. let them drive the pace.
+- still use element pointing when it helps frame your question — point at the thing you're asking about.`;
+
 function getSystemPrompt() {
   const toolHint = PLATFORM_TOOL_HINTS[process.platform] || PLATFORM_TOOL_HINTS.win32;
   return SYSTEM_PROMPT_BASE + toolHint;
@@ -158,12 +184,57 @@ function createToolExecutor(mcpTools) {
 }
 
 /**
- * Build the system prompt with tool awareness.
+ * Detect whether the user's message has a clear learning/teaching intent.
+ * This is a lightweight keyword + pattern check, not an LLM call.
+ * Returns true when the user is clearly trying to learn how to do something,
+ * understand a concept, or get walked through a process.
  */
-function buildSystemPrompt(mcpTools) {
-  if (!mcpTools || mcpTools.length === 0) return SYSTEM_PROMPT;
-  const toolList = mcpTools.map(t => `- ${t.name}: ${t.description}`).join('\n');
-  return `${SYSTEM_PROMPT}\n\navailable tools:\n${toolList}\n\nuse these tools whenever the user asks you to do something actionable. don't describe how to do it — use the tool and do it.`;
+function detectTeachingIntent(transcript) {
+  if (!transcript) return false;
+  const lower = transcript.toLowerCase();
+
+  // Direct learning signals — the user is explicitly asking to learn
+  const learnPhrases = [
+    "how do i", "how do you", "how can i", "how would i",
+    "teach me", "show me how", "walk me through", "explain how",
+    "help me understand", "help me learn", "what does this do",
+    "what is this", "what are these", "why does this", "why is this",
+    "i don't understand", "i don't get", "i'm confused",
+    "i'm trying to learn", "i'm new to", "i want to learn",
+    "can you explain", "could you explain", "what's the difference between",
+    "how does this work", "what happens if", "what happens when",
+    "where do i find", "where is the", "which one should i",
+    "step by step", "from scratch",
+  ];
+
+  return learnPhrases.some(phrase => lower.includes(phrase));
+}
+
+/**
+ * Build the system prompt with tool awareness and teaching modes.
+ * @param {Array} mcpTools - MCP tool definitions
+ * @param {Object} settings - user settings (for socraticMode flag)
+ * @param {string} transcript - current user message (for intent detection)
+ */
+function buildSystemPrompt(mcpTools, settings, transcript) {
+  let prompt = SYSTEM_PROMPT;
+
+  // Socratic mode is an explicit toggle — always applies when on
+  if (settings && settings.socraticMode) {
+    prompt += SOCRATIC_PROMPT_SEGMENT;
+  }
+  // Teaching style activates when intent is detected (and socratic isn't already on,
+  // since socratic is a stricter superset of teaching behavior)
+  else if (transcript && detectTeachingIntent(transcript)) {
+    prompt += TEACHING_PROMPT_SEGMENT;
+  }
+
+  if (mcpTools && mcpTools.length > 0) {
+    const toolList = mcpTools.map(t => `- ${t.name}: ${t.description}`).join('\n');
+    prompt += `\n\navailable tools:\n${toolList}\n\nuse these tools whenever the user asks you to do something actionable. don't describe how to do it — use the tool and do it.`;
+  }
+
+  return prompt;
 }
 
 /**
@@ -275,7 +346,7 @@ async function runAnthropicInference(model, transcript, screens, settings, onChu
   const requestParams = {
     model: model || "claude-sonnet-4-6",
     max_tokens: settings.maxTokens || 1024,
-    system: buildSystemPrompt(mcpTools),
+    system: buildSystemPrompt(mcpTools, settings, transcript),
     messages,
   };
 
@@ -384,7 +455,7 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
   const client = getOpenAIClient(baseURL, apiKey);
 
   // Build messages
-  const messages = [{ role: "system", content: buildSystemPrompt(mcpTools) }];
+  const messages = [{ role: "system", content: buildSystemPrompt(mcpTools, settings, transcript) }];
   for (const turn of conversationHistory) {
     messages.push({ role: "user", content: turn.user });
     messages.push({ role: "assistant", content: turn.assistant });
@@ -866,4 +937,4 @@ async function runOpenAICompatibleVisionComputerUse(provider, opts) {
   return result;
 }
 
-module.exports = { runInference, runComputerUse, clearHistory, SYSTEM_PROMPT };
+module.exports = { runInference, runComputerUse, clearHistory, buildSystemPrompt, detectTeachingIntent, SYSTEM_PROMPT };
