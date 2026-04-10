@@ -16,7 +16,7 @@
  * space before positioning the overlay window.
  */
 
-const { desktopCapturer, screen, nativeImage } = require("electron");
+const { desktopCapturer, screen, nativeImage, BrowserWindow } = require("electron");
 
 let MAX_DIMENSION = 1280;
 const JPEG_QUALITY = 80;
@@ -70,10 +70,26 @@ async function captureAllScreens(opts = {}) {
   const maxDim = opts.maxDimension || MAX_DIMENSION;
   const cursorPoint = screen.getCursorScreenPoint();
   const displays = screen.getAllDisplays();
+
+  // Hide our own windows before capture so the AI doesn't see CursorBuddy UI.
+  // Use setOpacity(0) instead of hide()/show() to avoid focus changes and flicker.
+  const ownWindows = BrowserWindow.getAllWindows();
+  const restoreFns = [];
+  for (const win of ownWindows) {
+    if (!win.isDestroyed() && win.isVisible()) {
+      const prevOpacity = win.getOpacity();
+      win.setOpacity(0);
+      restoreFns.push(() => { if (!win.isDestroyed()) win.setOpacity(prevOpacity); });
+    }
+  }
+
   const sources = await desktopCapturer.getSources({
     types: ["screen"],
     thumbnailSize: { width: 3840, height: 2160 }, // request max, we resize ourselves
   });
+
+  // Restore window opacity immediately after capture
+  for (const fn of restoreFns) fn();
 
   const results = [];
 
