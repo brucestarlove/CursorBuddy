@@ -85,7 +85,10 @@ let conversationHistory = [];
 const MAX_HISTORY = 10;
 
 function addToHistory(userMessage, assistantMessage) {
-  conversationHistory.push({ user: userMessage, assistant: assistantMessage });
+  // Strip POINT tags from stored history so stale coordinates don't leak
+  // into future turns and cause the model to echo them
+  const cleanAssistant = assistantMessage.replace(/\s*\[POINT:[^\]]*\]\s*/g, "").trim();
+  conversationHistory.push({ user: userMessage, assistant: cleanAssistant });
   if (conversationHistory.length > MAX_HISTORY) {
     conversationHistory = conversationHistory.slice(-MAX_HISTORY);
   }
