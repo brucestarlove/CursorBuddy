@@ -12,7 +12,7 @@
 const { app, BrowserWindow, Tray, Menu, screen, ipcMain, nativeImage, globalShortcut, clipboard, session } = require("electron");
 const path = require("path");
 const { execFile } = require("child_process");
-const { captureAllScreens, screenshotPointToScreenCoords, setCalibration } = require("./services/capture.js");
+const { captureAllScreens, screenshotPointToScreenCoords, setCalibration, setCaptureSettings } = require("./services/capture.js");
 const { runInference, runComputerUse, clearHistory } = require("./services/inference.js");
 const mcpServer = require("./services/mcp-server.js");
 const transcription = require("./services/transcription.js");
@@ -21,6 +21,8 @@ const { VoiceResponsePipeline } = require("./services/voice-response.js");
 const mcpClient = require("./services/mcp-client.js");
 const toolLoader = require("./services/tool-loader.js");
 const { getSystemTools } = require("./services/system-actions.js");
+const { routeIntent } = require("./services/intent-router.js");
+const { analyzeScreens } = require("./services/screen-analysis.js");
 const { sendToOverlay, sendToPanel, broadcast, setWindows, getOverlayWindow, getPanelWindow } = require("./lib/ipc-helpers.js");
 const { loadSettings, saveSettings } = require("./lib/settings-cache.js");
 const { parsePointingCoordinates } = require("./lib/point-parser.js");
@@ -394,7 +396,10 @@ async function executeInference({ transcript, provider, model, attachments, voic
       voiceMode: !!voiceMode,
       attachments: attachments?.length || 0,
     });
-    const screens = await captureAllScreens();
+    const screens = await captureAllScreens({
+      primaryOnly: settings.capturePrimaryOnly ?? false,
+      maxDimension: settings.captureResolution || undefined,
+    });
     // Add any manually attached screenshots (from clipboard intercept)
     if (attachments && attachments.length > 0) {
       attachments.forEach((b64, i) => {
@@ -425,6 +430,71 @@ async function executeInference({ transcript, provider, model, attachments, voic
 
     let fullResponseText = "";
     const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];
+
+    // ── Intent Routing ───────────────────────────────────────
+    const intentResult = routeIntent({
+      transcript,
+      hasScreenshots: screens.length > 0,
+      hasAttachments: (attachments && attachments.length > 0),
+    });
+    log.event("intent:routed", {
+      intent: intentResult.intent,
+      needsVision: intentResult.needsVision,
+      needsAction: intentResult.needsAction,
+      confidence: intentResult.confidence,
+      matchedCues: intentResult.matchedCues.slice(0, 5),
+    });
+    broadcast("intent:classified", intentResult);
+
+    // ── Screen Analysis (for visual queries) ─────────────────
+    let observations = null;
+    if (intentResult.needsVision && screens.length > 0) {
+      const settings_ = loadSettings();
+      const hasVisionProvider = settings_.visionProvider;
+      // Only run dedicated analysis if we have:
+      // - an explicit visionProvider configured, OR
+      // - the chat provider is a cloud API that supports vision (anthropic/openai)
+      // Do NOT run if only a local provider (ollama/lmstudio) is available —
+      // local models handle vision inline during chat inference
+      const chatProv = provider || settings_.chatProvider || "anthropic";
+      if (hasVisionProvider || chatProv === "anthropic" || chatProv === "openai") {
+        broadcast("inference:chunk", { type: "tool_use", name: "screen_analysis", input: { intent: intentResult.intent } });
+        observations = await analyzeScreens({
+          requestId: intentResult.requestId,
+          query: transcript,
+          intentType: intentResult.intent,
+          screens,
+          settings: settings_,
+        });
+        broadcast("inference:chunk", {
+          type: "tool_result",
+          name: "screen_analysis",
+          result: observations.summary || "Analysis complete",
+        });
+        log.event("screen_analysis:result", {
+          requestId: intentResult.requestId,
+          confidence: observations.confidence,
+          appsFound: observations.apps.length,
+          elementsFound: observations.elements.length,
+          summary: observations.summary?.slice(0, 100),
+        });
+      }
+    }
+
+    // ── Build augmented transcript ───────────────────────────
+    // For visual queries, prepend structured observations so the chat model
+    // answers from analyzed data instead of guessing from raw screenshots
+    let augmentedTranscript = transcript;
+    if (observations && observations.confidence > 0.2) {
+      const obsJson = JSON.stringify({
+        apps: observations.apps,
+        windows: observations.windows,
+        elements: observations.elements,
+        summary: observations.summary,
+        confidence: observations.confidence,
+      }, null, 2);
+      augmentedTranscript = `[Screen Analysis Result]\n${obsJson}\n\n[User Query]\n${transcript}\n\nAnswer using the screen analysis data above. Reference specific apps, windows, or elements you see. If the analysis found specific elements with coordinates, use those for pointing.`;
+    }
 
     // Gather all available tools (system actions + MCP client + pi-compatible)
     const allTools = [
@@ -479,11 +549,16 @@ async function executeInference({ transcript, provider, model, attachments, voic
       activeVoicePipeline = voicePipeline;
     }
 
+    // For non-visual intents, skip sending screenshots to the chat model
+    // to save tokens. Visual queries either have observations injected into
+    // the transcript or need raw screenshots for inline vision.
+    const screensForInference = intentResult.needsVision ? screens : [];
+
     await runInference({
       provider: provider || settings.chatProvider || "anthropic",
       model: model || settings.chatModel || "claude-sonnet-4-6",
-      transcript,
-      screens,
+      transcript: augmentedTranscript,
+      screens: screensForInference,
       settings,
       mcpTools: allTools.length > 0 ? allTools : undefined,
       onChunk: async (chunk) => {
@@ -529,7 +604,33 @@ async function executeInference({ transcript, provider, model, attachments, voic
               }
             }
 
-            // Fallback: computer use if no POINT and CU configured
+            // Use observation elements for pointing if available (visual queries)
+            if (!chunk.scaledPoint && observations && observations.elements.length > 0) {
+              const topElement = observations.elements.reduce((best, el) =>
+                el.confidence > (best?.confidence || 0) ? el : best, null);
+              if (topElement && topElement.confidence > 0.4) {
+                const targetScreenIndex = Math.max(0, Math.min(topElement.screen - 1, lastCapturedScreens.length - 1));
+                const targetScreen = lastCapturedScreens[targetScreenIndex] || cursorScreen;
+                if (targetScreen) {
+                  const sc = screenshotPointToScreenCoords(topElement.x, topElement.y, targetScreen);
+                  const cleanText = fullResponseText.replace(/\s*\[POINT:[^\]]*\]\s*/g, '').trim();
+                  const bubbleText = cleanText.length > 80
+                    ? cleanText.slice(0, 77).replace(/\s+\S*$/, '') + '\u2026'
+                    : cleanText;
+                  chunk.scaledPoint = {
+                    x: Math.round(sc.x), y: Math.round(sc.y),
+                    label: topElement.label || 'element', bubbleText,
+                  };
+                  log.event("inference:point_from_analysis", {
+                    label: topElement.label, confidence: topElement.confidence,
+                    imgX: topElement.x, imgY: topElement.y,
+                    screenX: chunk.scaledPoint.x, screenY: chunk.scaledPoint.y,
+                  });
+                }
+              }
+            }
+
+            // Fallback: computer use if still no point and CU configured
             if (!chunk.scaledPoint && settings.cuProvider && settings.cuModel && cursorScreen) {
               try {
                 const cuResult = await runComputerUse({
@@ -804,11 +905,15 @@ app.whenReady().then(() => {
   registerPushToTalk();
   startScreenshotInterceptor();
 
-  // Load calibration from settings
+  // Load calibration + capture settings from settings
   const startupSettings = loadSettings();
   if (startupSettings.calibration) {
     setCalibration(startupSettings.calibration);
     console.log('[Calibration] Loaded:', JSON.stringify(startupSettings.calibration));
+  }
+  if (startupSettings.captureResolution) {
+    setCaptureSettings({ maxDimension: startupSettings.captureResolution });
+    console.log('[Capture] Resolution:', startupSettings.captureResolution);
   }
 
   // Load pi-compatible tools and watch for changes

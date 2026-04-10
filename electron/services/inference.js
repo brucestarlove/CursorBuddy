@@ -15,7 +15,7 @@ const { extractToolResultText } = require("../lib/tool-result-text.js");
 const { parsePointingCoordinates } = require("../lib/point-parser.js");
 const log = require("../lib/session-logger.js");
 
-const SYSTEM_PROMPT = `you're cursorbuddy, a friendly always-on companion that lives in the user's menu bar. the user speaks to you via push-to-talk or types in the chat panel. you can see their screen(s) and any screenshots they've attached. your reply will be spoken aloud via text-to-speech AND displayed in a chat panel, so write conversationally. this is an ongoing conversation — you remember everything they've said before.
+const SYSTEM_PROMPT_BASE = `you're cursorbuddy, a friendly always-on companion that lives in the user's menu bar. the user speaks to you via push-to-talk or types in the chat panel. you can see their screen(s) and any screenshots they've attached. your reply will be spoken aloud via text-to-speech AND displayed in a chat panel, so write conversationally. this is an ongoing conversation — you remember everything they've said before.
 
 rules:
 - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out.
@@ -39,7 +39,17 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates and label is a
 
 if pointing wouldn't help, append [POINT:none].
 
-computer control:
+screen analysis:
+when the user's message starts with [Screen Analysis Result], a dedicated vision system has already analyzed the screenshots. use that structured data to answer — reference the apps, windows, and elements it found. if elements have x,y coordinates, use those for pointing instead of guessing from the screenshot.
+
+other tools:
+you may also have access to additional tools. if tools are listed in the conversation, use them when helpful. when you use a tool, briefly explain what you're doing.
+
+screenshots:
+you receive automatic screenshots of all connected displays with each message. the one labeled "primary focus" is where the cursor is. if the user has manually attached screenshots (labeled "user-attached screenshot"), those are things they specifically captured and want you to analyze — give them priority over the auto-captured screens.`;
+
+const PLATFORM_TOOL_HINTS = {
+  darwin: `\ncomputer control:
 you have tools to control the user's computer. when the user asks you to open something, click something, type something, or navigate — DO IT using your tools. don't just describe how to do it. use the tools:
 - open_app_or_url: open apps by name or URLs in the browser. use this first when asked to open something.
 - click: click at screen coordinates. use with screenshot coordinates converted to screen space.
@@ -48,13 +58,27 @@ you have tools to control the user's computer. when the user asks you to open so
 - scroll: scroll up or down at a position.
 - wait: pause between actions to let the UI update.
 
-when the user says "open github", use open_app_or_url with "https://github.com". when they say "open safari", use open_app_or_url with "Safari". always act, don't just explain.
+when the user says "open github", use open_app_or_url with "https://github.com". when they say "open safari", use open_app_or_url with "Safari". always act, don't just explain.`,
 
-other tools:
-you may also have access to additional tools. if tools are listed in the conversation, use them when helpful. when you use a tool, briefly explain what you're doing.
+  win32: `\ncomputer control:
+you have tools to control the user's Windows computer. when the user asks you to open something, click something, type something, or navigate — DO IT using your tools. don't just describe how to do it. use the tools:
+- open_app_or_url: open apps by name or URLs in the browser. use this first when asked to open something.
+- click: click at screen coordinates. use with screenshot coordinates converted to screen space.
+- type_text: type text at the current cursor position. click a text field first.
+- key_press: press keyboard shortcuts like "ctrl+t", "ctrl+l", "return", "escape", "alt+space". use ctrl instead of cmd on windows.
+- scroll: scroll up or down at a position.
+- wait: pause between actions to let the UI update.
 
-screenshots:
-you receive automatic screenshots of all connected displays with each message. the one labeled "primary focus" is where the cursor is. if the user has manually attached screenshots (labeled "user-attached screenshot"), those are things they specifically captured and want you to analyze — give them priority over the auto-captured screens.`;
+when the user says "open github", use open_app_or_url with "https://github.com". when they say "open chrome", use open_app_or_url with "Chrome". always act, don't just explain.`,
+};
+
+function getSystemPrompt() {
+  const toolHint = PLATFORM_TOOL_HINTS[process.platform] || PLATFORM_TOOL_HINTS.win32;
+  return SYSTEM_PROMPT_BASE + toolHint;
+}
+
+// Keep backward compat — SYSTEM_PROMPT is still exported
+const SYSTEM_PROMPT = getSystemPrompt();
 
 /** Conversation history — kept in the main process */
 let conversationHistory = [];
@@ -346,17 +370,26 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
 
   let fullText = "";
 
-  // Build request params
+  // Build request params — newer OpenAI models (gpt-5.x, o-series) use
+  // max_completion_tokens instead of max_tokens
+  const usesNewTokenParam = /^(gpt-5|o[34])/.test(modelName);
+  const tokenLimit = settings.maxTokens || 1024;
+
   const requestParams = {
     model: modelName,
     messages,
-    max_tokens: settings.maxTokens || 1024,
     temperature: settings.temperature || 0.7,
     stream: true,
   };
 
+  if (usesNewTokenParam) {
+    requestParams.max_completion_tokens = tokenLimit;
+  } else {
+    requestParams.max_tokens = tokenLimit;
+  }
+
   // OpenAI reasoning models (o3, o4-mini) use reasoning_effort
-  const isReasoningModel = /^o[34]/.test(model);
+  const isReasoningModel = /^o[34]/.test(modelName);
   if (isReasoningModel && settings.chatReasoningEnabled) {
     const budget = settings.chatReasoningBudget || 4096;
     if (budget <= 1024) requestParams.reasoning_effort = 'low';
@@ -595,7 +628,7 @@ async function runOpenAIComputerUse(opts) {
   const { userQuestion, assistantResponse, screenCapture, settings, onChunk } = opts;
   if (!settings.openaiKey) throw new Error("OpenAI API key required for computer use");
 
-  const model = settings.cuModel || "computer-use-preview";
+  const model = settings.cuModel || "gpt-5.4";
 
   // Match display aspect ratio — same logic as Anthropic CU
   const cuRes = bestCUResolution(screenCapture.displayWidthPx, screenCapture.displayHeightPx);
@@ -616,6 +649,27 @@ async function runOpenAIComputerUse(opts) {
     console.warn('[CU] OpenAI: could not resize screenshot:', resizeErr.message);
   }
 
+  // GA computer tool — replaces deprecated computer_use_preview
+  const requestBody = {
+    model,
+    tools: [{ type: "computer", display_width: declaredWidth, display_height: declaredHeight }],
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: `data:image/jpeg;base64,${imageData}`,
+            detail: "auto",
+          },
+          { type: "input_text", text: CU_PROMPT(userQuestion, assistantResponse) },
+        ],
+      },
+    ],
+  };
+
+  log.event("cu:openai_request", { model, declaredWidth, declaredHeight });
+
   // OpenAI CU uses the Responses API — different from Chat Completions
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -623,24 +677,7 @@ async function runOpenAIComputerUse(opts) {
       "Authorization": `Bearer ${settings.openaiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      tools: [{ type: "computer_use_preview", display_width: declaredWidth, display_height: declaredHeight }],
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_image",
-              image_url: `data:image/jpeg;base64,${imageData}`,
-              detail: "auto",
-            },
-            { type: "input_text", text: CU_PROMPT(userQuestion, assistantResponse) },
-          ],
-        },
-      ],
-      truncation: "auto",
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -650,35 +687,37 @@ async function runOpenAIComputerUse(opts) {
 
   const data = await response.json();
 
-  // OpenAI returns output[] with computer_call items containing action arrays
+  // OpenAI GA format returns output[] with computer_call items containing batched actions[]
   const outputs = data.output || [];
   for (const item of outputs) {
-    if (item.type === "computer_call" && item.action) {
-      const action = item.action;
-      // click, double_click actions have x, y coordinates
-      if ((action.type === "click" || action.type === "double_click") && action.x != null && action.y != null) {
-        // Route through screenshotPointToScreenCoords for calibration parity
-        const cuScreenCapture = {
-          screenshotWidthPx: declaredWidth,
-          screenshotHeightPx: declaredHeight,
-          displayWidthPx: screenCapture.displayWidthPx,
-          displayHeightPx: screenCapture.displayHeightPx,
-          displayX: screenCapture.displayX,
-          displayY: screenCapture.displayY,
-          scaleX: screenCapture.displayWidthPx / declaredWidth,
-          scaleY: screenCapture.displayHeightPx / declaredHeight,
-        };
-        const calibratedPoint = screenshotPointToScreenCoords(action.x, action.y, cuScreenCapture);
+    if (item.type === "computer_call") {
+      const actions = Array.isArray(item.actions) ? item.actions : [];
 
-        const result = {
-          action: action.type,
-          coordinate: [Math.round(calibratedPoint.x), Math.round(calibratedPoint.y)],
-          cuCoordinate: [action.x, action.y],
-          declaredResolution: [declaredWidth, declaredHeight],
-        };
-        console.log(`[CU] OpenAI found element: ${result.action} at (${result.coordinate})`);
-        onChunk?.({ type: "tool_result", name: "computer_use", result: `${result.action} at (${result.coordinate})` });
-        return result;
+      for (const action of actions) {
+        // click, double_click actions have x, y coordinates
+        if ((action.type === "click" || action.type === "double_click") && action.x != null && action.y != null) {
+          const cuScreenCapture = {
+            screenshotWidthPx: declaredWidth,
+            screenshotHeightPx: declaredHeight,
+            displayWidthPx: screenCapture.displayWidthPx,
+            displayHeightPx: screenCapture.displayHeightPx,
+            displayX: screenCapture.displayX,
+            displayY: screenCapture.displayY,
+            scaleX: screenCapture.displayWidthPx / declaredWidth,
+            scaleY: screenCapture.displayHeightPx / declaredHeight,
+          };
+          const calibratedPoint = screenshotPointToScreenCoords(action.x, action.y, cuScreenCapture);
+
+          const result = {
+            action: action.type,
+            coordinate: [Math.round(calibratedPoint.x), Math.round(calibratedPoint.y)],
+            cuCoordinate: [action.x, action.y],
+            declaredResolution: [declaredWidth, declaredHeight],
+          };
+          console.log(`[CU] OpenAI found element: ${result.action} at (${result.coordinate})`);
+          onChunk?.({ type: "tool_result", name: "computer_use", result: `${result.action} at (${result.coordinate})` });
+          return result;
+        }
       }
     }
     // Check for text responses

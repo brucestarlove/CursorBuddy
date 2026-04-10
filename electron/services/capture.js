@@ -18,8 +18,19 @@
 
 const { desktopCapturer, screen, nativeImage } = require("electron");
 
-const MAX_DIMENSION = 1280;
+let MAX_DIMENSION = 1280;
 const JPEG_QUALITY = 80;
+
+/**
+ * Update capture settings at runtime.
+ * @param {object} opts
+ * @param {number} [opts.maxDimension] - max screenshot dimension (longest edge)
+ */
+function setCaptureSettings(opts) {
+  if (opts.maxDimension && opts.maxDimension >= 640 && opts.maxDimension <= 3840) {
+    MAX_DIMENSION = opts.maxDimension;
+  }
+}
 
 /**
  * Anthropic Computer Use recommended resolutions.
@@ -50,7 +61,13 @@ function bestCUResolution(displayWidth, displayHeight) {
  *   displayWidthPx / displayHeightPx — the logical screen size
  *   scaleX / scaleY — multiply screenshot coords by these to get screen coords
  */
-async function captureAllScreens() {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.primaryOnly] - only capture the screen the cursor is on
+ * @param {number}  [opts.maxDimension] - override MAX_DIMENSION for this capture
+ */
+async function captureAllScreens(opts = {}) {
+  const maxDim = opts.maxDimension || MAX_DIMENSION;
   const cursorPoint = screen.getCursorScreenPoint();
   const displays = screen.getAllDisplays();
   const sources = await desktopCapturer.getSources({
@@ -67,21 +84,24 @@ async function captureAllScreens() {
       display.bounds.y <= cursorPoint.y &&
       cursorPoint.y < display.bounds.y + display.bounds.height;
 
+    // Skip non-primary screens if primaryOnly is set
+    if (opts.primaryOnly && !isCursorScreen) continue;
+
     const source = sources[i] || sources[0];
     if (!source) continue;
 
     let thumbnail = source.thumbnail;
     if (thumbnail.isEmpty()) continue;
 
-    // Resize to MAX_DIMENSION on longest edge, preserving aspect ratio
+    // Resize to maxDim on longest edge, preserving aspect ratio
     const origSize = thumbnail.getSize();
     const aspectRatio = origSize.width / origSize.height;
     let targetWidth, targetHeight;
     if (origSize.width >= origSize.height) {
-      targetWidth = Math.min(origSize.width, MAX_DIMENSION);
+      targetWidth = Math.min(origSize.width, maxDim);
       targetHeight = Math.round(targetWidth / aspectRatio);
     } else {
-      targetHeight = Math.min(origSize.height, MAX_DIMENSION);
+      targetHeight = Math.min(origSize.height, maxDim);
       targetWidth = Math.round(targetHeight * aspectRatio);
     }
 
@@ -96,8 +116,8 @@ async function captureAllScreens() {
     const label = displays.length === 1
       ? `user's screen (cursor is here) (image dimensions: ${targetWidth}x${targetHeight} pixels)`
       : isCursorScreen
-        ? `screen ${i + 1} of ${displays.length} — cursor is on this screen (primary focus) (image dimensions: ${targetWidth}x${targetHeight} pixels)`
-        : `screen ${i + 1} of ${displays.length} — secondary screen (image dimensions: ${targetWidth}x${targetHeight} pixels)`;
+        ? `screen ${i + 1} of ${displays.length} - cursor is on this screen (primary focus) (image dimensions: ${targetWidth}x${targetHeight} pixels)`
+        : `screen ${i + 1} of ${displays.length} - secondary screen (image dimensions: ${targetWidth}x${targetHeight} pixels)`;
 
     // workArea excludes menu bar + dock on macOS
     const wa = display.workArea;
@@ -172,4 +192,4 @@ function screenshotPointToScreenCoords(pointX, pointY, screenCapture) {
   return { x, y };
 }
 
-module.exports = { captureAllScreens, screenshotPointToScreenCoords, bestCUResolution, setCalibration };
+module.exports = { captureAllScreens, screenshotPointToScreenCoords, bestCUResolution, setCalibration, setCaptureSettings };

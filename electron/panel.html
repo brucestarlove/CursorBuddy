@@ -336,6 +336,31 @@ button.btn.active{background:var(--accent-bg,rgba(59,130,246,0.18));border-color
           <select id="cu-model" onchange="slotModelChanged('cu')" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.5rem 0.75rem;color:#ECEEED;font-size:0.9rem;outline:none;margin-top:8px"></select>
           <div id="cu-reasoning" class="reasoning-toggle"></div>
           <div class="slider-row" style="margin-top:6px"><label>CU Resolution</label><select id="cu-resolution" onchange="saveCUResolution()" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.4rem 0.6rem;color:#ECEEED;font-size:0.85rem;outline:none"><option value="1280x800">1280x800 (Mac)</option><option value="1024x768">1024x768 (4:3)</option><option value="1366x768">1366x768 (16:9)</option></select></div>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;color:#ECEEED;cursor:pointer">
+              <span class="toggle-switch"><input type="checkbox" id="capturePrimaryOnly" onchange="saveCaptureSettings()"><span class="toggle-track"></span></span>
+              Primary screen only
+            </label>
+            <span class="hint" style="margin-top:-4px">Only send the screen your cursor is on (saves tokens on multi-monitor)</span>
+            <div class="slider-row"><label>Screenshot Resolution</label>
+              <select id="captureResolution" onchange="saveCaptureSettings()" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.4rem 0.6rem;color:#ECEEED;font-size:0.85rem;outline:none">
+                <option value="1280">1280px (default)</option>
+                <option value="1920">1920px (HD)</option>
+                <option value="2560">2560px (QHD)</option>
+                <option value="3840">3840px (4K)</option>
+              </select>
+            </div>
+            <span class="hint" style="margin-top:-4px">Max dimension of screenshots sent to models. Higher = better detail, more tokens.</span>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <div class="section">
+          <div class="section-label">Vision / Screen Analysis</div>
+          <p class="desc" style="margin-bottom:6px">Dedicated model for screen understanding and element detection. Falls back to CU provider if unset.</p>
+          <select id="vision-provider" onchange="slotProviderChanged('vision')" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.5rem 0.75rem;color:#ECEEED;font-size:0.9rem;outline:none"></select>
+          <select id="vision-model" onchange="slotModelChanged('vision')" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.5rem 0.75rem;color:#ECEEED;font-size:0.9rem;outline:none;margin-top:8px"></select>
+          <div id="vision-reasoning" class="reasoning-toggle"></div>
         </div>
         <div class="divider"></div>
 
@@ -730,6 +755,9 @@ async function loadAllSettings() {
     document.getElementById('cursorColorPicker').value = settings.cursorColor;
   }
   if (settings.cuResolution) document.getElementById('cu-resolution').value = settings.cuResolution;
+  // Capture settings
+  if (settings.capturePrimaryOnly) document.getElementById('capturePrimaryOnly').checked = true;
+  if (settings.captureResolution) document.getElementById('captureResolution').value = String(settings.captureResolution);
   if (settings.uiFont) { document.getElementById('uiFont').value = settings.uiFont; setUIFont(settings.uiFont); }
   if (settings.monoFont) { document.getElementById('monoFont').value = settings.monoFont; setMonoFont(settings.monoFont); }
   buildThemeGrid();
@@ -834,7 +862,7 @@ function resetAppearance() {
 
 function resetModels() {
   if (!confirm('Reset all model selections to defaults?')) return;
-  ['chatProvider','chatModel','cuProvider','cuModel','fastProvider','fastModel','planProvider','planModel','toolProvider','toolModel'].forEach(k => delete settings[k]);
+  ['chatProvider','chatModel','cuProvider','cuModel','visionProvider','visionModel','fastProvider','fastModel','planProvider','planModel','toolProvider','toolModel'].forEach(k => delete settings[k]);
   ['chatReasoningEnabled','chatReasoningBudget','cuReasoningEnabled','cuReasoningBudget','fastReasoningEnabled','planReasoningEnabled','toolReasoningEnabled'].forEach(k => delete settings[k]);
   persistSettings();
   location.reload();
@@ -890,6 +918,14 @@ function syncColorPicker(hex) {
   document.getElementById('cursorColor').value = hex;
   settings.cursorColor = hex;
   send('config:update', { cursorColor: hex });
+  persistSettings();
+}
+
+function saveCaptureSettings() {
+  const primaryOnly = document.getElementById('capturePrimaryOnly')?.checked || false;
+  const resolution = parseInt(document.getElementById('captureResolution')?.value) || 1280;
+  settings.capturePrimaryOnly = primaryOnly;
+  settings.captureResolution = resolution;
   persistSettings();
 }
 
@@ -1080,17 +1116,23 @@ function loadGoogleFont(fontVal) {
 // ── Model system (provider→model dropdowns) ──────────────────
 const PROVIDERS = {
   anthropic: { name:'Anthropic', models:['claude-sonnet-4-6','claude-opus-4-6','claude-haiku-3-5'] },
-  openai:    { name:'OpenAI',    models:['gpt-4o','gpt-4o-mini','o3','o4-mini'] },
+  openai:    { name:'OpenAI',    models:['gpt-5.4','gpt-4o','gpt-4o-mini','o3','o4-mini'] },
   ollama:    { name:'Ollama',    models:[] },
   lmstudio:  { name:'LM Studio', models:[] },
 };
 const CU_PROVIDERS = {
   anthropic: { name:'Anthropic', models:['claude-sonnet-4-6','claude-opus-4-6','claude-opus-4-5'] },
-  openai:    { name:'OpenAI',    models:['computer-use-preview'] },
+  openai:    { name:'OpenAI',    models:['gpt-5.4'] },
   ollama:    { name:'Ollama',    models:[] },
   lmstudio:  { name:'LM Studio', models:[] },
 };
-const SLOTS = ['chat','cu','fast','plan','tool'];
+const VISION_PROVIDERS = {
+  anthropic: { name:'Anthropic', models:['claude-sonnet-4-6','claude-opus-4-6','claude-haiku-3-5'] },
+  openai:    { name:'OpenAI',    models:['gpt-5.4','gpt-4o','gpt-4o-mini'] },
+  ollama:    { name:'Ollama',    models:[] },
+  lmstudio:  { name:'LM Studio', models:[] },
+};
+const SLOTS = ['chat','cu','vision','fast','plan','tool'];
 const BUDGET_LEVELS = [
   { label:'Off', value:0 }, { label:'Low', value:1024 }, { label:'Medium', value:4096 },
   { label:'High', value:16384 }, { label:'Max', value:32768 },
@@ -1103,7 +1145,7 @@ function buildAllModelSlots() {
 function populateProviderDropdown(slotId) {
   const provSel = document.getElementById(slotId + '-provider');
   if (!provSel) return;
-  const provMap = slotId === 'cu' ? CU_PROVIDERS : PROVIDERS;
+  const provMap = slotId === 'cu' ? CU_PROVIDERS : slotId === 'vision' ? VISION_PROVIDERS : PROVIDERS;
   const saved = settings[slotId + 'Provider'] || Object.keys(provMap)[0];
   provSel.innerHTML = '';
   for (const [pid, p] of Object.entries(provMap)) {
@@ -1118,7 +1160,7 @@ function populateProviderDropdown(slotId) {
 function populateModelDropdown(slotId, providerId) {
   const modSel = document.getElementById(slotId + '-model');
   if (!modSel) return;
-  const provMap = slotId === 'cu' ? CU_PROVIDERS : PROVIDERS;
+  const provMap = slotId === 'cu' ? CU_PROVIDERS : slotId === 'vision' ? VISION_PROVIDERS : PROVIDERS;
   const models = provMap[providerId]?.models || [];
   const saved = settings[slotId + 'Model'];
   const selectedModel = models.includes(saved) ? saved : (models[0] || '');
@@ -1171,6 +1213,8 @@ async function refreshLocalModels() {
   try { const r=await fetch(lu+'/v1/models'); const d=await r.json(); PROVIDERS.lmstudio.models=(d.data||[]).map(m=>m.id); } catch(_) { PROVIDERS.lmstudio.models=['(not running)']; }
   CU_PROVIDERS.ollama.models = [...PROVIDERS.ollama.models];
   CU_PROVIDERS.lmstudio.models = [...PROVIDERS.lmstudio.models];
+  VISION_PROVIDERS.ollama.models = [...PROVIDERS.ollama.models];
+  VISION_PROVIDERS.lmstudio.models = [...PROVIDERS.lmstudio.models];
   SLOTS.forEach(s => { populateModelDropdown(s, document.getElementById(s+'-provider')?.value || 'anthropic'); });
 }
 
