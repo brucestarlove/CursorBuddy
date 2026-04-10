@@ -398,7 +398,6 @@ async function executeInference({ transcript, provider, model, attachments, voic
       attachments: attachments?.length || 0,
     });
     const screens = await captureAllScreens({
-      primaryOnly: settings.capturePrimaryOnly ?? false,
       maxDimension: settings.captureResolution || undefined,
     });
     // Add any manually attached screenshots (from clipboard intercept)

@@ -337,11 +337,6 @@ button.btn.active{background:var(--accent-bg,rgba(59,130,246,0.18));border-color
           <div id="cu-reasoning" class="reasoning-toggle"></div>
           <div class="slider-row" style="margin-top:6px"><label>CU Resolution</label><select id="cu-resolution" onchange="saveCUResolution()" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.4rem 0.6rem;color:#ECEEED;font-size:0.85rem;outline:none"><option value="1280x800">1280x800 (Mac)</option><option value="1024x768">1024x768 (4:3)</option><option value="1366x768">1366x768 (16:9)</option></select></div>
           <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
-            <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;color:#ECEEED;cursor:pointer">
-              <span class="toggle-switch"><input type="checkbox" id="capturePrimaryOnly" onchange="saveCaptureSettings()"><span class="toggle-track"></span></span>
-              Primary screen only
-            </label>
-            <span class="hint" style="margin-top:-4px">Only send the screen your cursor is on (saves tokens on multi-monitor)</span>
             <div class="slider-row"><label>Screenshot Resolution</label>
               <select id="captureResolution" onchange="saveCaptureSettings()" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:0.6rem;padding:0.4rem 0.6rem;color:#ECEEED;font-size:0.85rem;outline:none">
                 <option value="1280">1280px (default)</option>
@@ -756,7 +751,6 @@ async function loadAllSettings() {
   }
   if (settings.cuResolution) document.getElementById('cu-resolution').value = settings.cuResolution;
   // Capture settings
-  if (settings.capturePrimaryOnly) document.getElementById('capturePrimaryOnly').checked = true;
   if (settings.captureResolution) document.getElementById('captureResolution').value = String(settings.captureResolution);
   if (settings.uiFont) { document.getElementById('uiFont').value = settings.uiFont; setUIFont(settings.uiFont); }
   if (settings.monoFont) { document.getElementById('monoFont').value = settings.monoFont; setMonoFont(settings.monoFont); }
@@ -922,9 +916,7 @@ function syncColorPicker(hex) {
 }
 
 function saveCaptureSettings() {
-  const primaryOnly = document.getElementById('capturePrimaryOnly')?.checked || false;
   const resolution = parseInt(document.getElementById('captureResolution')?.value) || 1280;
-  settings.capturePrimaryOnly = primaryOnly;
   settings.captureResolution = resolution;
   persistSettings();
 }

@@ -100,24 +100,25 @@ async function captureAllScreens(opts = {}) {
       display.bounds.y <= cursorPoint.y &&
       cursorPoint.y < display.bounds.y + display.bounds.height;
 
-    // Skip non-primary screens if primaryOnly is set
-    if (opts.primaryOnly && !isCursorScreen) continue;
-
     const source = sources[i] || sources[0];
     if (!source) continue;
 
     let thumbnail = source.thumbnail;
     if (thumbnail.isEmpty()) continue;
 
-    // Resize to maxDim on longest edge, preserving aspect ratio
+    // Cursor-aware resolution: primary screen gets full resolution,
+    // secondary screens get reduced resolution to save tokens
+    const screenMaxDim = isCursorScreen ? maxDim : Math.round(maxDim * 0.5);
+
+    // Resize to screenMaxDim on longest edge, preserving aspect ratio
     const origSize = thumbnail.getSize();
     const aspectRatio = origSize.width / origSize.height;
     let targetWidth, targetHeight;
     if (origSize.width >= origSize.height) {
-      targetWidth = Math.min(origSize.width, maxDim);
+      targetWidth = Math.min(origSize.width, screenMaxDim);
       targetHeight = Math.round(targetWidth / aspectRatio);
     } else {
-      targetHeight = Math.min(origSize.height, maxDim);
+      targetHeight = Math.min(origSize.height, screenMaxDim);
       targetWidth = Math.round(targetHeight * aspectRatio);
     }
 
