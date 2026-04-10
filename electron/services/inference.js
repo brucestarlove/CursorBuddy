@@ -40,7 +40,7 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates and label is a
 if pointing wouldn't help, append [POINT:none].
 
 screen analysis:
-when the user's message starts with [Screen Analysis Result], a dedicated vision system has already analyzed the screenshots. use that structured data to answer — reference the apps, windows, and elements it found. if elements have x,y coordinates, use those for pointing instead of guessing from the screenshot.
+when your input includes a [Screen Analysis] block, a dedicated vision system has already analyzed the screenshots. use that data to answer — reference the apps, windows, and elements it found. if elements have coordinates, use those for pointing instead of guessing from the screenshot.
 
 other tools:
 you may also have access to additional tools. if tools are listed in the conversation, use them when helpful. when you use a tool, briefly explain what you're doing.
@@ -164,6 +164,39 @@ function buildSystemPrompt(mcpTools) {
 }
 
 /**
+ * Build a structured observation context block from screen analysis results.
+ * This replaces the old approach of injecting JSON into the transcript string.
+ * The observation data is presented as a separate context block that the model
+ * can reference without it being confused with the user's actual message.
+ */
+function buildObservationContext(observations) {
+  const parts = ["[Screen Analysis]"];
+
+  if (observations.apps.length > 0) {
+    const appList = observations.apps.map(a => `${a.name} (screen ${a.screen})`).join(", ");
+    parts.push(`Visible apps: ${appList}`);
+  }
+
+  if (observations.windows.length > 0) {
+    const winList = observations.windows.map(w => `${w.count} ${w.kind} window${w.count > 1 ? "s" : ""} (screen ${w.screen})`).join(", ");
+    parts.push(`Windows: ${winList}`);
+  }
+
+  if (observations.elements.length > 0) {
+    const elList = observations.elements.map(e => `"${e.label}" at (${e.x},${e.y}) screen ${e.screen}`).join("; ");
+    parts.push(`Elements found: ${elList}`);
+    parts.push("Use these coordinates for pointing if relevant.");
+  }
+
+  if (observations.summary) {
+    parts.push(`Summary: ${observations.summary}`);
+  }
+
+  parts.push(`Analysis confidence: ${observations.confidence}`);
+  return parts.join("\n");
+}
+
+/**
  * Build Anthropic-format tool definitions from MCP tools.
  */
 function buildAnthropicToolDefs(mcpTools) {
@@ -183,19 +216,20 @@ function buildAnthropicToolDefs(mcpTools) {
  * @param {string} opts.transcript - user's message
  * @param {Array} opts.screens - screenshot data from capture service
  * @param {object} opts.settings - full settings object (keys, params)
+ * @param {object} [opts.observations] - structured screen analysis result (ObservationResult)
  * @param {function} opts.onChunk - called with {type, text?, error?}
  * @returns {Promise<string>} full response text
  */
 async function runInference(opts) {
-  const { provider, model, transcript, screens, settings, onChunk, mcpTools } = opts;
+  const { provider, model, transcript, screens, settings, onChunk, mcpTools, observations } = opts;
 
   switch (provider) {
     case "anthropic":
-      return runAnthropicInference(model, transcript, screens, settings, onChunk, mcpTools);
+      return runAnthropicInference(model, transcript, screens, settings, onChunk, mcpTools, observations);
     case "openai":
     case "ollama":
     case "lmstudio":
-      return runOpenAICompatibleInference(provider, model, transcript, screens, settings, onChunk, mcpTools);
+      return runOpenAICompatibleInference(provider, model, transcript, screens, settings, onChunk, mcpTools, observations);
     default:
       throw new Error(`Unknown provider: ${provider}`);
   }
@@ -203,7 +237,7 @@ async function runInference(opts) {
 
 // ── Anthropic ─────────────────────────────────────────────
 
-async function runAnthropicInference(model, transcript, screens, settings, onChunk, mcpTools) {
+async function runAnthropicInference(model, transcript, screens, settings, onChunk, mcpTools, observations) {
   const client = getAnthropicClient(settings.anthropicKey);
 
   // Build messages with conversation history
@@ -222,6 +256,12 @@ async function runAnthropicInference(model, transcript, screens, settings, onChu
     });
     content.push({ type: "text", text: scr.label });
   }
+
+  // Inject structured observations as a separate context block before the user query
+  if (observations && observations.confidence > 0.2) {
+    content.push({ type: "text", text: buildObservationContext(observations) });
+  }
+
   content.push({ type: "text", text: transcript });
   messages.push({ role: "user", content });
 
@@ -319,7 +359,7 @@ async function runAnthropicInference(model, transcript, screens, settings, onChu
 
 // ── OpenAI-compatible (OpenAI, Ollama, LM Studio) ─────────
 
-async function runOpenAICompatibleInference(provider, model, transcript, screens, settings, onChunk, mcpTools) {
+async function runOpenAICompatibleInference(provider, model, transcript, screens, settings, onChunk, mcpTools, observations) {
   let baseURL, apiKey;
 
   switch (provider) {
@@ -365,6 +405,11 @@ async function runOpenAICompatibleInference(provider, model, transcript, screens
       userContent.push({ type: "text", text: scr.label });
     }
   }
+  // Inject structured observations before the user query
+  if (observations && observations.confidence > 0.2) {
+    userContent.push({ type: "text", text: buildObservationContext(observations) });
+  }
+
   userContent.push({ type: "text", text: transcript });
   messages.push({ role: "user", content: userContent.length === 1 ? transcript : userContent });
 

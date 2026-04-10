@@ -6,13 +6,102 @@
  *   - visual_understanding:  needs screen analysis (what app, what's on screen)
  *   - visual_action:         needs screen analysis + action execution (click, open, find)
  *
- * Currently uses keyword heuristics. Later this slot can be replaced by
- * a remote orchestrator doing centralized intent matching.
+ * Two classification modes:
+ *   1. Semantic — fast local LLM call (LM Studio / Ollama) for accurate classification
+ *   2. Keyword — regex heuristics as fallback when no local model is available
+ *
+ * Later this slot can be replaced by a remote orchestrator.
  */
 
 const { createIntentResult } = require("../lib/contracts.js");
+const log = require("../lib/session-logger.js");
 
-// ── Pattern Banks ────────────────────────────────────────────
+// ── Semantic Classification (local LLM) ─────────────────────
+
+const CLASSIFY_PROMPT = `Classify the user's intent into exactly one category. Reply with ONLY the category name, nothing else.
+
+Categories:
+- non_visual: general questions, conversation, tasks that don't need screen context (jokes, drafts, calculations, summaries, coding help, general knowledge)
+- visual_understanding: user wants to know what's on their screen, identify apps/windows/elements, read text or errors visible on screen
+- visual_action: user wants to interact with something on screen (click, open, scroll, find a button, navigate, point to something)
+
+User message: `;
+
+/**
+ * Classify intent using a local LLM for semantic understanding.
+ * Fast and free — runs against LM Studio or Ollama.
+ *
+ * @param {string} text - user's message
+ * @param {object} settings - app settings (for local model URLs)
+ * @returns {Promise<{intent: string, confidence: number} | null>} null if unavailable
+ */
+async function classifyWithLocalLLM(text, settings) {
+  // Try local endpoints for fast, free intent classification.
+  // Always probe LM Studio and Ollama on their default ports — even if the
+  // user's main provider is cloud. The 3s timeout handles "not running."
+  const lmstudioUrl = settings.lmstudioUrl || "http://localhost:1234";
+  const ollamaUrl = settings.ollamaUrl || "http://localhost:11434";
+
+  // Try LM Studio first, then Ollama
+  const endpoints = [
+    { baseURL: lmstudioUrl + "/v1", apiKey: "lmstudio", label: "lmstudio" },
+    { baseURL: ollamaUrl + "/v1", apiKey: "ollama", label: "ollama" },
+  ];
+
+  for (const ep of endpoints) {
+    const result = await tryLocalClassify(text, ep.baseURL, ep.apiKey, settings.fastModel);
+    if (result) return result;
+  }
+
+  return null;
+}
+
+async function tryLocalClassify(text, baseURL, apiKey, model) {
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s max
+
+    const response = await fetch(`${baseURL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: model || undefined,
+        messages: [{ role: "user", content: CLASSIFY_PROMPT + text }],
+        max_tokens: 20,
+        temperature: 0,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const raw = (data.choices?.[0]?.message?.content || "").trim().toLowerCase();
+
+    // Parse the response — look for one of our three categories
+    let intent = null;
+    if (raw.includes("visual_action")) intent = "visual_action";
+    else if (raw.includes("visual_understanding")) intent = "visual_understanding";
+    else if (raw.includes("non_visual")) intent = "non_visual";
+
+    if (!intent) return null;
+
+    log.event("intent:semantic_classify", { intent, raw: raw.slice(0, 50), model: model || "default" });
+    return { intent, confidence: 0.85 }; // Local LLM gets solid but not perfect confidence
+  } catch (err) {
+    // Timeout or connection refused — local model not running
+    if (err.name !== "AbortError") {
+      log.event("intent:semantic_unavailable", { error: err.message });
+    }
+    return null;
+  }
+}
+
+// ── Pattern Banks (keyword fallback) ────────────────────────
 // Each entry: [regex, weight]. Higher weight = stronger signal.
 
 const VISUAL_UNDERSTANDING_PATTERNS = [
@@ -21,7 +110,10 @@ const VISUAL_UNDERSTANDING_PATTERNS = [
   [/\bwhat(?:'s| is) (?:this|that)\b/i, 0.7],
   [/\bhow many (windows?|tabs?|screens?|monitors?|displays?)/i, 0.9],
   [/\bwhat do you see\b/i, 1.0],
+  [/\bdo you see\b/i, 0.9],
   [/\bcan you see\b/i, 0.8],
+  [/\byou see (?:any|the|my|a)\b/i, 0.7],
+  [/\bsee (?:anything|something|any)\b/i, 0.7],
   [/\bdescribe (?:the |my |this )?(screen|display|window|desktop)/i, 1.0],
   [/\bidentify\b/i, 0.7],
   [/\brecognize\b/i, 0.6],
@@ -57,7 +149,6 @@ const VISUAL_ACTION_PATTERNS = [
   [/\bfocus(?: on)?\b/i, 0.5],
 ];
 
-// Patterns that suggest NO visual context is needed (boost non_visual)
 const NON_VISUAL_PATTERNS = [
   [/\b(summarize|summary|recap)\b/i, 0.7],
   [/\b(explain|what does|how does|why does)\b.*\b(mean|work|do)\b/i, 0.6],
@@ -72,25 +163,9 @@ const NON_VISUAL_PATTERNS = [
   [/\b(todo|task|checklist)\b/i, 0.6],
 ];
 
-// ── Router ───────────────────────────────────────────────────
+// ── Keyword Router (fallback) ────────────────────────────────
 
-/**
- * Classify a user request.
- *
- * @param {Object} opts
- * @param {string}   opts.transcript       - the user's message
- * @param {boolean}  [opts.hasScreenshots] - were screenshots captured?
- * @param {boolean}  [opts.hasAttachments] - did user attach images?
- * @param {string[]} [opts.previousTurns]  - recent conversation context
- * @returns {import('../lib/contracts.js').IntentResult}
- */
-function routeIntent({ transcript, hasScreenshots = false, hasAttachments = false, previousTurns = [] }) {
-  const text = (transcript || "").trim();
-  if (!text) {
-    return createIntentResult({ intent: "non_visual", confidence: 1.0, matchedCues: [] });
-  }
-
-  // Score each category
+function routeIntentKeywords(text, hasAttachments) {
   let visualUnderstandingScore = 0;
   let visualActionScore = 0;
   let nonVisualScore = 0;
@@ -117,23 +192,11 @@ function routeIntent({ transcript, hasScreenshots = false, hasAttachments = fals
     }
   }
 
-  // Boost visual scores if user attached images
   if (hasAttachments) {
     visualUnderstandingScore += 0.5;
     matchedCues.push("boost:attachment");
   }
 
-  // Determine winner
-  const scores = {
-    non_visual: nonVisualScore,
-    visual_understanding: visualUnderstandingScore,
-    visual_action: visualActionScore,
-  };
-
-  // Visual action implies visual understanding too
-  // If action score is highest, intent is visual_action
-  // If understanding score is highest, intent is visual_understanding
-  // Otherwise non_visual
   let intent = "non_visual";
   let topScore = nonVisualScore;
 
@@ -146,26 +209,55 @@ function routeIntent({ transcript, hasScreenshots = false, hasAttachments = fals
     topScore = visualUnderstandingScore;
   }
 
-  // If all scores are 0, default to non_visual
-  // But if screenshots exist and no strong non-visual signal, lean visual
-  if (topScore === 0 && hasScreenshots && nonVisualScore === 0) {
-    // Ambiguous — could go either way. Keep as non_visual but low confidence.
-    intent = "non_visual";
-    topScore = 0.1;
-  }
-
-  // Compute confidence: how decisive was the classification?
   const totalScore = nonVisualScore + visualUnderstandingScore + visualActionScore;
   const confidence = totalScore > 0
     ? Math.min(topScore / Math.max(totalScore, 1), 1.0)
     : 0.5;
 
+  return { intent, confidence: Math.round(confidence * 100) / 100, matchedCues };
+}
+
+// ── Public API ───────────────────────────────────────────────
+
+/**
+ * Classify a user request. Tries semantic (local LLM) first, falls back to keywords.
+ *
+ * @param {Object} opts
+ * @param {string}   opts.transcript       - the user's message
+ * @param {boolean}  [opts.hasScreenshots] - were screenshots captured?
+ * @param {boolean}  [opts.hasAttachments] - did user attach images?
+ * @param {object}   [opts.settings]       - app settings (for local model access)
+ * @returns {Promise<import('../lib/contracts.js').IntentResult>}
+ */
+async function routeIntent({ transcript, hasScreenshots = false, hasAttachments = false, settings = null }) {
+  const text = (transcript || "").trim();
+  if (!text) {
+    return createIntentResult({ intent: "non_visual", confidence: 1.0, matchedCues: ["empty"] });
+  }
+
+  // Try semantic classification first (local LLM — fast, free)
+  if (settings) {
+    const semantic = await classifyWithLocalLLM(text, settings);
+    if (semantic) {
+      return createIntentResult({
+        intent: semantic.intent,
+        needsVision: semantic.intent !== "non_visual",
+        needsAction: semantic.intent === "visual_action",
+        confidence: semantic.confidence,
+        matchedCues: ["semantic"],
+      });
+    }
+  }
+
+  // Fall back to keyword heuristics
+  const kw = routeIntentKeywords(text, hasAttachments);
+
   return createIntentResult({
-    intent,
-    needsVision: intent !== "non_visual",
-    needsAction: intent === "visual_action",
-    confidence: Math.round(confidence * 100) / 100,
-    matchedCues,
+    intent: kw.intent,
+    needsVision: kw.intent !== "non_visual",
+    needsAction: kw.intent === "visual_action",
+    confidence: kw.confidence,
+    matchedCues: kw.matchedCues,
   });
 }
 

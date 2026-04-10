@@ -23,6 +23,7 @@ const toolLoader = require("./services/tool-loader.js");
 const { getSystemTools } = require("./services/system-actions.js");
 const { routeIntent } = require("./services/intent-router.js");
 const { analyzeScreens } = require("./services/screen-analysis.js");
+const observationCache = require("./services/observation-cache.js");
 const { sendToOverlay, sendToPanel, broadcast, setWindows, getOverlayWindow, getPanelWindow } = require("./lib/ipc-helpers.js");
 const { loadSettings, saveSettings } = require("./lib/settings-cache.js");
 const { parsePointingCoordinates } = require("./lib/point-parser.js");
@@ -432,10 +433,11 @@ async function executeInference({ transcript, provider, model, attachments, voic
     const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];
 
     // ── Intent Routing ───────────────────────────────────────
-    const intentResult = routeIntent({
+    const intentResult = await routeIntent({
       transcript,
       hasScreenshots: screens.length > 0,
       hasAttachments: (attachments && attachments.length > 0),
+      settings,
     });
     log.event("intent:routed", {
       intent: intentResult.intent,
@@ -449,51 +451,57 @@ async function executeInference({ transcript, provider, model, attachments, voic
     // ── Screen Analysis (for visual queries) ─────────────────
     let observations = null;
     if (intentResult.needsVision && screens.length > 0) {
-      const settings_ = loadSettings();
-      const hasVisionProvider = settings_.visionProvider;
-      // Only run dedicated analysis if we have:
-      // - an explicit visionProvider configured, OR
-      // - the chat provider is a cloud API that supports vision (anthropic/openai)
-      // Do NOT run if only a local provider (ollama/lmstudio) is available —
-      // local models handle vision inline during chat inference
-      const chatProv = provider || settings_.chatProvider || "anthropic";
-      if (hasVisionProvider || chatProv === "anthropic" || chatProv === "openai") {
-        broadcast("inference:chunk", { type: "tool_use", name: "screen_analysis", input: { intent: intentResult.intent } });
-        observations = await analyzeScreens({
-          requestId: intentResult.requestId,
-          query: transcript,
-          intentType: intentResult.intent,
-          screens,
-          settings: settings_,
+      // Check observation cache first — skip re-analysis if screen state is fresh
+      const cached = observationCache.getLatest(transcript);
+      if (cached) {
+        observations = cached;
+        log.event("screen_analysis:cached", {
+          requestId: cached.requestId,
+          confidence: cached.confidence,
+          appsFound: cached.apps.length,
+          elementsFound: cached.elements.length,
         });
         broadcast("inference:chunk", {
           type: "tool_result",
           name: "screen_analysis",
-          result: observations.summary || "Analysis complete",
+          result: `(cached) ${cached.summary || "Analysis reused"}`,
         });
-        log.event("screen_analysis:result", {
-          requestId: intentResult.requestId,
-          confidence: observations.confidence,
-          appsFound: observations.apps.length,
-          elementsFound: observations.elements.length,
-          summary: observations.summary?.slice(0, 100),
-        });
+      } else {
+        const settings_ = loadSettings();
+        const hasVisionProvider = settings_.visionProvider;
+        // Only run dedicated analysis if we have:
+        // - an explicit visionProvider configured, OR
+        // - the chat provider is a cloud API that supports vision (anthropic/openai)
+        // Do NOT run if only a local provider (ollama/lmstudio) is available —
+        // local models handle vision inline during chat inference
+        const chatProv = provider || settings_.chatProvider || "anthropic";
+        if (hasVisionProvider || chatProv === "anthropic" || chatProv === "openai") {
+          broadcast("inference:chunk", { type: "tool_use", name: "screen_analysis", input: { intent: intentResult.intent } });
+          observations = await analyzeScreens({
+            requestId: intentResult.requestId,
+            query: transcript,
+            intentType: intentResult.intent,
+            screens,
+            settings: settings_,
+          });
+          broadcast("inference:chunk", {
+            type: "tool_result",
+            name: "screen_analysis",
+            result: observations.summary || "Analysis complete",
+          });
+          log.event("screen_analysis:result", {
+            requestId: intentResult.requestId,
+            confidence: observations.confidence,
+            appsFound: observations.apps.length,
+            elementsFound: observations.elements.length,
+            summary: observations.summary?.slice(0, 100),
+          });
+          // Cache successful observations
+          if (observations.confidence > 0.2) {
+            observationCache.store(observations, transcript);
+          }
+        }
       }
-    }
-
-    // ── Build augmented transcript ───────────────────────────
-    // For visual queries, prepend structured observations so the chat model
-    // answers from analyzed data instead of guessing from raw screenshots
-    let augmentedTranscript = transcript;
-    if (observations && observations.confidence > 0.2) {
-      const obsJson = JSON.stringify({
-        apps: observations.apps,
-        windows: observations.windows,
-        elements: observations.elements,
-        summary: observations.summary,
-        confidence: observations.confidence,
-      }, null, 2);
-      augmentedTranscript = `[Screen Analysis Result]\n${obsJson}\n\n[User Query]\n${transcript}\n\nAnswer using the screen analysis data above. Reference specific apps, windows, or elements you see. If the analysis found specific elements with coordinates, use those for pointing.`;
     }
 
     // Gather all available tools (system actions + MCP client + pi-compatible)
@@ -549,17 +557,19 @@ async function executeInference({ transcript, provider, model, attachments, voic
       activeVoicePipeline = voicePipeline;
     }
 
-    // For non-visual intents, skip sending screenshots to the chat model
-    // to save tokens. Visual queries either have observations injected into
-    // the transcript or need raw screenshots for inline vision.
-    const screensForInference = intentResult.needsVision ? screens : [];
+    // For confident non-visual intents, skip sending screenshots to save tokens.
+    // When confidence is low (ambiguous query), send screenshots anyway —
+    // better to waste a few tokens than give a blind response.
+    const confidentNonVisual = !intentResult.needsVision && intentResult.confidence > 0.6;
+    const screensForInference = confidentNonVisual ? [] : screens;
 
     await runInference({
       provider: provider || settings.chatProvider || "anthropic",
       model: model || settings.chatModel || "claude-sonnet-4-6",
-      transcript: augmentedTranscript,
+      transcript,
       screens: screensForInference,
       settings,
+      observations: observations || undefined,
       mcpTools: allTools.length > 0 ? allTools : undefined,
       onChunk: async (chunk) => {
         if (chunk.type === "text") {
@@ -674,11 +684,13 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
   await executeInference({ transcript, provider, model, attachments, voiceMode, historyMode: "none" });
 });
 
-ipcMain.on("inference:clear-history", () => clearHistory());
+ipcMain.on("inference:clear-history", () => { clearHistory(); observationCache.clear(); });
 ipcMain.handle("chat:history-load", () => chatHistory.getHistory());
 ipcMain.handle("chat:history-append", (_event, role, text) => chatHistory.appendMessage(role, text));
 ipcMain.handle("chat:history-replace-last", (_event, role, text) => chatHistory.replaceLastMessage(role, text));
 ipcMain.handle("chat:history-clear", () => chatHistory.clearHistory());
+ipcMain.handle("observations:flush", () => observationCache.flush());
+ipcMain.handle("observations:stats", () => observationCache.stats());
 
 // ── IPC: Transcription ────────────────────────────────────────
 
